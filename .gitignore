@@ -1,0 +1,17 @@
+*.iml
+.gradle
+/local.properties
+/.idea
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# APK outputs (don't commit built APKs)
+*.apk
+*.aab
+
+# DO commit the TFLite model (it's an asset)
+!app/src/main/assets/saved_model.tflite

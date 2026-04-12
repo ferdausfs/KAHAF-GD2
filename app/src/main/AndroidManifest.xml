@@ -1,25 +1,31 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- ─── Permissions ─── -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
-    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
-        android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.BIND_ACCESSIBILITY_SERVICE" />
+    <uses-permission android:name="android.permission.BIND_DEVICE_ADMIN" />
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    xmlns:tools="http://schemas.android.com/tools"
 
     <application
-        android:name=".KBApplication"
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
-        android:roundIcon="@mipmap/ic_launcher_round"
-        android:supportsRtl="true"
-        android:theme="@style/Theme.KeywordBlocker">
+        android:theme="@style/Theme.BulldogBlocker"
+        android:supportsRtl="true">
 
-        <!-- Main Activity -->
+        <!-- ─── Main Activity ─── -->
         <activity
             android:name=".ui.MainActivity"
             android:exported="true"
@@ -30,9 +36,42 @@
             </intent-filter>
         </activity>
 
-        <!-- Accessibility Service -->
+        <!-- ─── Setup Activity (first-run wizard) ─── -->
+        <activity
+            android:name=".ui.SetupActivity"
+            android:exported="false" />
+
+        <!-- ─── Uninstall Delay Screen ─── -->
+        <activity
+            android:name=".ui.UninstallDelayActivity"
+            android:exported="true"
+            android:showOnLockScreen="true"
+            android:theme="@style/Theme.BulldogBlocker.Fullscreen">
+            <intent-filter>
+                <action android:name="android.intent.action.DELETE" />
+                <data android:scheme="package" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <!-- ─── Device Admin Receiver ─── -->
+        <receiver
+            android:name=".admin.DeviceAdminReceiver"
+            android:exported="true"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+                <action android:name="android.app.action.DEVICE_ADMIN_DISABLED" />
+                <action android:name="android.app.action.DEVICE_ADMIN_DISABLE_REQUESTED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- ─── Accessibility Service (URL + UI blocking) ─── -->
         <service
-            android:name=".accessibility.ContentBlockerService"
+            android:name=".service.BlockerAccessibilityService"
             android:exported="true"
             android:label="@string/accessibility_service_label"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
@@ -41,26 +80,22 @@
             </intent-filter>
             <meta-data
                 android:name="android.accessibilityservice"
-                android:resource="@xml/accessibility_service_config" />
+                android:resource="@xml/accessibility_service" />
         </service>
 
-        <!-- Foreground Service -->
+        <!-- ─── Foreground Blocker Service ─── -->
         <service
             android:name=".service.BlockerForegroundService"
             android:exported="false"
-            android:foregroundServiceType="specialUse">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="content_blocker" />
-        </service>
+            android:foregroundServiceType="specialUse" />
 
-        <!-- Boot Receiver -->
+        <!-- ─── Boot Receiver ─── -->
         <receiver
-            android:name=".watchdog.BootReceiver"
+            android:name=".receiver.BootReceiver"
             android:exported="true">
-            <intent-filter>
+            <intent-filter android:priority="999">
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
-                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
             </intent-filter>
         </receiver>
 

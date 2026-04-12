@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Device Admin capabilities.
+  The app MUST be active Device Admin before it can be uninstalled.
+  User must go: Settings > Security > Device Admin Apps > BulldogBlocker > Deactivate
+  Only THEN can they uninstall. This is enforced by Android OS.
+-->
+<device-admin>
+    <uses-policies>
+        <limit-password />
+        <watch-login />
+        <reset-password />
+        <lock-screen />
+        <wipe-data />
+        <expire-password />
+        <disable-camera />
+        <disable-keyguard-features />
+    </uses-policies>
+</device-admin>

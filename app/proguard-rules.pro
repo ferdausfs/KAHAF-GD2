@@ -1,14 +1,8 @@
-# TFLite
--keep class org.tensorflow.** { *; }
--keep class com.google.flatbuffers.** { *; }
+# TensorFlow Lite
+-keep class org.tensorflow.lite.** { *; }
+-keep class org.tensorflow.lite.support.** { *; }
 
-# Room
--keep class * extends androidx.room.RoomDatabase
--keep @androidx.room.Entity class *
--keep @androidx.room.Dao class *
-
-# Accessibility Service
--keep class com.kb.blocker.accessibility.ContentBlockerService { *; }
-
-# Keep model classes
--keepclassmembers class com.kb.blocker.** { *; }
+# Device Admin
+-keep class com.ftt.bulldogblocker.admin.** { *; }
+-keep class com.ftt.bulldogblocker.receiver.** { *; }
+-keep class com.ftt.bulldogblocker.service.** { *; }
