@@ -23,10 +23,22 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      # ── 3. NOTE: TFLite model ────────────────────
-      # Model is NOT bundled in the APK.
-      # User uploads saved_model.tflite at runtime via the app UI.
-      # No build step needed here.
+      # ── 3. Download Gradle + generate wrapper ────
+      # gradlew exists in repo but gradle-wrapper.jar is binary,
+      # so we download Gradle and regenerate the wrapper properly.
+      - name: Generate Gradle wrapper
+        run: |
+          GRADLE_VERSION=8.4
+          wget -q "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
+               -O gradle-bin.zip
+          unzip -q gradle-bin.zip
+          mkdir -p gradle/wrapper
+          ./gradle-${GRADLE_VERSION}/bin/gradle wrapper \
+            --gradle-version ${GRADLE_VERSION} \
+            --distribution-type bin
+          chmod +x gradlew
+          echo "✅ gradlew generated:"
+          ls -lh gradlew gradle/wrapper/
 
       # ── 4. Cache Gradle ──────────────────────────
       - name: Cache Gradle
@@ -38,18 +50,14 @@ jobs:
           key: gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
           restore-keys: gradle-
 
-      # ── 5. Grant execute permission ──────────────
-      - name: Make gradlew executable
-        run: chmod +x gradlew
-
-      # ── 6. Build debug APK ───────────────────────
+      # ── 5. Build debug APK ───────────────────────
       - name: Build debug APK
         run: ./gradlew assembleDebug --stacktrace
 
-      # ── 7. Upload APK artifact ───────────────────
+      # ── 6. Upload APK artifact ───────────────────
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: BulldogBlocker-debug
           path: app/build/outputs/apk/debug/app-debug.apk
-          retention-days: 7
+          retention-days: 14
