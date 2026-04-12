@@ -18,12 +18,18 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
-          cache: gradle
 
+      # Gradle install করো (gradlew file repo তে নেই তাই)
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.4'
 
-      - name: Grant execute permission for gradlew
+      # Wrapper generate করো → gradlew তৈরি হবে
+      - name: Generate Gradle Wrapper
+        run: gradle wrapper --gradle-version=8.4
+
+      - name: Make gradlew executable
         run: chmod +x ./gradlew
 
       - name: Build Debug APK
