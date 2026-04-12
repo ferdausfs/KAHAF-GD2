@@ -24,18 +24,25 @@ class ContentBlockerService : AccessibilityService() {
 
     companion object {
         private const val TAG = "ContentBlockerService"
-
-        /** Broadcast action sent from MainActivity after a new model is added. */
         const val ACTION_RELOAD_MODELS = "com.kb.blocker.RELOAD_MODELS"
+
+        // --- Timing constants ---
+
+        // How long to wait after the last event before running text analysis.
+        // Prevents triggering on every single keystroke while typing.
+        private const val TEXT_DEBOUNCE_MS = 600L
+
+        // Minimum gap between two block actions.
+        // Prevents the service from spamming BACK press.
+        private const val BLOCK_COOLDOWN_MS = 2500L
+
+        // Minimum gap between two screenshot captures.
+        private const val IMAGE_INTERVAL_MS = 2000L
 
         @Volatile
         var isRunning = false
     }
 
-    /**
-     * SupervisorJob: if one child coroutine crashes, the rest keep running.
-     * The service stays alive even if a single coroutine fails.
-     */
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
     private lateinit var textAnalyzer: TextAnalyzer
@@ -44,13 +51,18 @@ class ContentBlockerService : AccessibilityService() {
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    // Minimum ms between two screenshot analyses (throttle)
+    // --- Debounce state ---
+    // Pending text analysis job. Cancelled and restarted on every new event.
+    private var textDebounceJob: Job? = null
+
+    // --- Block cooldown ---
+    // Timestamp of the last block action. Prevents double-blocks.
+    @Volatile private var lastBlockTime = 0L
+
+    // --- Image throttle ---
     @Volatile private var lastImageTime = 0L
 
-    // While blocking, ignore new events to prevent a loop
-    @Volatile private var isBlocking = false
-
-    // Receives ACTION_RELOAD_MODELS broadcast from MainActivity
+    // BroadcastReceiver for model reload signal from MainActivity
     private val modelReloadReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == ACTION_RELOAD_MODELS) {
@@ -81,21 +93,32 @@ class ContentBlockerService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event == null || isBlocking) return
+        if (event == null) return
+
+        // If we are still in the cooldown window, ignore all events.
+        val now = System.currentTimeMillis()
+        if (now - lastBlockTime < BLOCK_COOLDOWN_MS) return
 
         try {
             when (event.eventType) {
                 AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
-                AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
                 AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED,
                 AccessibilityEvent.TYPE_VIEW_SCROLLED -> {
-
-                    // 1. Text analysis — fast, runs on the binder thread
+                    // Content is changing rapidly (typing, scrolling).
+                    // Debounce: cancel any pending analysis and restart the timer.
+                    // Analysis only runs after TEXT_DEBOUNCE_MS of silence.
                     if (prefs.textAnalysisEnabled) {
-                        analyzeText(event)
+                        scheduleTextAnalysis(event)
                     }
+                }
 
-                    // 2. Image analysis — API 30+ only, throttled, async
+                AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
+                    // A new window/screen appeared. Run text check immediately
+                    // (no debounce) since the content is now stable.
+                    if (prefs.textAnalysisEnabled) {
+                        runTextAnalysisNow(event)
+                    }
+                    // Also trigger image analysis on screen change
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
                         && prefs.imageAnalysisEnabled
                     ) {
@@ -103,26 +126,70 @@ class ContentBlockerService : AccessibilityService() {
                     }
                 }
             }
+
+            // Image analysis also runs on scroll (throttled to IMAGE_INTERVAL_MS)
+            if (event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED
+                && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+                && prefs.imageAnalysisEnabled
+            ) {
+                maybeAnalyzeImage()
+            }
+
         } catch (e: Exception) {
-            // Never re-throw — service stability is top priority
             Log.e(TAG, "Event error (caught, service continues)", e)
         }
     }
 
     // ---------- Text Analysis ----------
 
-    private fun analyzeText(event: AccessibilityEvent) {
+    /**
+     * Debounced text check.
+     * Cancels the previous pending job and schedules a new one after
+     * TEXT_DEBOUNCE_MS. This means analysis only runs when the user
+     * has stopped typing/scrolling for that duration.
+     */
+    private fun scheduleTextAnalysis(event: AccessibilityEvent) {
+        // Snapshot the node source before the coroutine runs
         val source = event.source ?: return
-        try {
+
+        textDebounceJob?.cancel()
+        textDebounceJob = serviceScope.launch {
+            delay(TEXT_DEBOUNCE_MS)
+
+            // Check cooldown again after the delay
+            if (System.currentTimeMillis() - lastBlockTime < BLOCK_COOLDOWN_MS) {
+                source.recycle()
+                return@launch
+            }
+
             val sb = StringBuilder()
             collectText(source, sb)
-            if (sb.isNotEmpty() && textAnalyzer.containsBlockedContent(sb.toString())) {
-                Log.d(TAG, "Text block triggered")
-                performBlock()
-            }
-        } finally {
-            // Always recycle the root node to avoid memory leaks
             try { source.recycle() } catch (_: Exception) {}
+
+            if (sb.isNotEmpty() && textAnalyzer.containsBlockedContent(sb.toString())) {
+                Log.d(TAG, "Text block triggered (debounced)")
+                withContext(Dispatchers.Main) { performBlock() }
+            }
+        }
+    }
+
+    /**
+     * Immediate text check for stable screens (window state changed).
+     * No debounce needed since the screen just loaded.
+     */
+    private fun runTextAnalysisNow(event: AccessibilityEvent) {
+        val source = event.source ?: return
+        serviceScope.launch {
+            try {
+                val sb = StringBuilder()
+                collectText(source, sb)
+                if (sb.isNotEmpty() && textAnalyzer.containsBlockedContent(sb.toString())) {
+                    Log.d(TAG, "Text block triggered (window change)")
+                    withContext(Dispatchers.Main) { performBlock() }
+                }
+            } finally {
+                try { source.recycle() } catch (_: Exception) {}
+            }
         }
     }
 
@@ -147,7 +214,7 @@ class ContentBlockerService : AccessibilityService() {
 
     private fun maybeAnalyzeImage() {
         val now = System.currentTimeMillis()
-        if (now - lastImageTime < prefs.imageIntervalMs) return
+        if (now - lastImageTime < IMAGE_INTERVAL_MS) return
         lastImageTime = now
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -176,7 +243,6 @@ class ContentBlockerService : AccessibilityService() {
         serviceScope.launch {
             var bmp: Bitmap? = null
             try {
-                // HardwareBuffer → software Bitmap (TFLite requires software-backed bitmap)
                 bmp = Bitmap.wrapHardwareBuffer(
                     result.hardwareBuffer,
                     result.colorSpace
@@ -199,13 +265,19 @@ class ContentBlockerService : AccessibilityService() {
 
     /**
      * Press BACK to exit the current app.
-     * isBlocking is reset after 1 second to accept new events.
+     *
+     * Uses lastBlockTime instead of a boolean flag so that:
+     * 1. The cooldown window is precise (BLOCK_COOLDOWN_MS).
+     * 2. All pending debounce jobs automatically respect it.
      */
     private fun performBlock() {
-        if (isBlocking) return
-        isBlocking = true
+        val now = System.currentTimeMillis()
+        if (now - lastBlockTime < BLOCK_COOLDOWN_MS) return
+
+        lastBlockTime = now
+        textDebounceJob?.cancel() // Cancel any pending debounce
         performGlobalAction(GLOBAL_ACTION_BACK)
-        mainHandler.postDelayed({ isBlocking = false }, 1000L)
+        Log.d(TAG, "BACK pressed - cooldown ${BLOCK_COOLDOWN_MS}ms")
     }
 
     // ---------- DB Keyword Observer ----------
@@ -214,12 +286,8 @@ class ContentBlockerService : AccessibilityService() {
         serviceScope.launch {
             try {
                 val dao = AppDatabase.getInstance(applicationContext).keywordDao()
-
-                // Initial load before real-time collection starts
                 val init = dao.getAllKeywordsSync()
                 textAnalyzer.updateKeywords(init.map { it.keyword })
-
-                // Collect real-time updates from Room Flow
                 dao.getAllKeywords().collect { list ->
                     textAnalyzer.updateKeywords(list.map { it.keyword })
                 }
@@ -252,6 +320,7 @@ class ContentBlockerService : AccessibilityService() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 registerReceiver(modelReloadReceiver, filter, RECEIVER_NOT_EXPORTED)
             } else {
+                @Suppress("UnspecifiedRegisterReceiverFlag")
                 registerReceiver(modelReloadReceiver, filter)
             }
         } catch (e: Exception) {
