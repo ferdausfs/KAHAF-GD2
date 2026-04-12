@@ -12,6 +12,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.textfield.TextInputEditText
+import com.kb.blocker.accessibility.ContentBlockerService
 import com.kb.blocker.databinding.ActivityMainBinding
 import com.kb.blocker.ml.ModelManager
 import com.kb.blocker.watchdog.ServiceWatchdog
@@ -128,8 +129,8 @@ class MainActivity : AppCompatActivity() {
     // ─── Model Import ─────────────────────────────────────────────
 
     /**
-     * User-selected URI থেকে .tflite file internal storage এ copy করো।
-     * ContentBlockerService এর ModelManager auto-reload করবে।
+     * Copy a user-selected .tflite URI into internal storage.
+     * Sends a broadcast so the running AccessibilityService reloads its models.
      */
     private fun importModel(uri: Uri) {
         lifecycleScope.launch(Dispatchers.IO) {
@@ -166,10 +167,12 @@ class MainActivity : AppCompatActivity() {
                     if (loaded) {
                         Toast.makeText(
                             this@MainActivity,
-                            "✅ Model '$name' যোগ হয়েছে! Image analysis চালু।",
+                            "Model '$name' added! Image analysis active.",
                             Toast.LENGTH_LONG
                         ).show()
                         refreshModelStatus()
+                        // Tell the running AccessibilityService to reload models
+                        sendBroadcast(Intent(ContentBlockerService.ACTION_RELOAD_MODELS))
                     } else {
                         // Invalid file হলে delete করো
                         dest.delete()
@@ -192,7 +195,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Model folder এ কতটা model আছে দেখাও */
+    /** Show how many AI models are currently loaded. */
     private fun refreshModelStatus() {
         val count = File(filesDir, "models")
             .listFiles { f -> f.extension == "tflite" || f.extension == "lite" }

@@ -13,13 +13,11 @@ import com.kb.blocker.R
 import java.util.concurrent.TimeUnit
 
 /**
- * WorkManager periodic task।
+ * WorkManager periodic task.
+ * Checks every 15 minutes whether the Accessibility Service is still enabled.
+ * If it is off, sends a high-priority notification to the user.
  *
- * প্রতি 15 মিনিটে Accessibility Service চালু আছে কিনা check করে।
- * বন্ধ থাকলে high-priority notification দেয়।
- *
- * WorkManager system-level scheduler use করে —
- * app process মরে গেলেও scheduled থাকে।
+ * WorkManager uses a system-level scheduler, so it survives app process death.
  */
 class ServiceWatchdog(
     private val context: Context,
@@ -30,7 +28,7 @@ class ServiceWatchdog(
         private const val TAG = "ServiceWatchdog"
         private const val WORK_NAME = "kb_service_watchdog"
 
-        /** Schedule করো — duplicate হলে existing রাখো */
+        /** Schedule the watchdog. Idempotent - existing work is kept if already scheduled. */
         fun schedule(context: Context) {
             val req = PeriodicWorkRequestBuilder<ServiceWatchdog>(
                 15, TimeUnit.MINUTES
@@ -50,7 +48,7 @@ class ServiceWatchdog(
             WorkManager.getInstance(context).cancelUniqueWork(WORK_NAME)
         }
 
-        /** Accessibility Service enabled আছে কিনা system setting থেকে check */
+        /** Check whether the Accessibility Service is currently enabled in system settings. */
         fun isAccessibilityEnabled(context: Context): Boolean {
             return try {
                 val enabled = Settings.Secure.getString(
@@ -68,10 +66,10 @@ class ServiceWatchdog(
 
     override suspend fun doWork(): Result {
         if (!isAccessibilityEnabled(context)) {
-            Log.w(TAG, "Service is OFF — notifying user")
+            Log.w(TAG, "Service is OFF - notifying user")
             notifyUser()
         } else {
-            Log.d(TAG, "Service is alive ✅")
+            Log.d(TAG, "Service is alive")
         }
         return Result.success()
     }
@@ -84,8 +82,8 @@ class ServiceWatchdog(
         )
 
         val notif = NotificationCompat.Builder(context, KBApplication.WATCHDOG_CHANNEL_ID)
-            .setContentTitle("⚠️ KeywordBlocker বন্ধ!")
-            .setContentText("Accessibility Service বন্ধ হয়ে গেছে। চালু করতে tap করুন।")
+            .setContentTitle("KeywordBlocker Service Off")
+            .setContentText("Accessibility Service stopped. Tap to re-enable.")
             .setSmallIcon(R.drawable.ic_shield)
             .setContentIntent(intent)
             .setAutoCancel(true)

@@ -13,7 +13,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val repo = KeywordRepository(app)
 
-    /** UI এ collect করো — lifecycle-aware */
+    /** Collect this in the UI. Lifecycle-aware via WhileSubscribed. */
     val keywords = repo.allKeywords.stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5_000),

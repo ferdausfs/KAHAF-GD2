@@ -6,9 +6,9 @@ import com.kb.blocker.data.PrefsManager
 import java.util.concurrent.CopyOnWriteArraySet
 
 /**
- * Thread-safe keyword analyzer.
- * CopyOnWriteArraySet ব্যবহার করে — service thread থেকে read,
- * main/DB thread থেকে write — কোনো lock লাগবে না।
+ * Thread-safe keyword text analyzer.
+ * Uses CopyOnWriteArraySet so the service thread can read
+ * while the DB/main thread writes — no explicit lock needed.
  */
 class TextAnalyzer(context: Context) {
 
@@ -19,9 +19,7 @@ class TextAnalyzer(context: Context) {
         private const val TAG = "TextAnalyzer"
     }
 
-    /**
-     * DB থেকে নতুন keyword list পেলে এটা call করো।
-     */
+    /** Call this whenever the keyword list changes (from DB observer). */
     fun updateKeywords(newKeywords: List<String>) {
         keywords.clear()
         keywords.addAll(newKeywords.map { it.trim().lowercase() })
@@ -29,9 +27,8 @@ class TextAnalyzer(context: Context) {
     }
 
     /**
-     * Text এ blocked keyword আছে কিনা check করে।
-     * Case-insensitive, partial match।
-     * @return true → block করো
+     * Returns true if the given text contains any blocked keyword.
+     * Case-insensitive, partial match.
      */
     fun containsBlockedContent(text: String): Boolean {
         if (!prefs.textAnalysisEnabled) return false
@@ -39,7 +36,6 @@ class TextAnalyzer(context: Context) {
         if (text.isBlank()) return false
 
         val lowerText = text.lowercase()
-
         return try {
             keywords.any { keyword ->
                 keyword.isNotBlank() && lowerText.contains(keyword)

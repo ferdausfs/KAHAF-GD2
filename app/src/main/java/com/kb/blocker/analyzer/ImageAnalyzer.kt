@@ -7,8 +7,8 @@ import com.kb.blocker.data.PrefsManager
 import com.kb.blocker.ml.ModelManager
 
 /**
- * ImageAnalyzer — ModelManager এর উপর পাতলা wrapper।
- * ContentBlockerService এটাকেই call করে।
+ * Thin wrapper around ModelManager.
+ * ContentBlockerService calls this for image analysis.
  */
 class ImageAnalyzer(context: Context) {
 
@@ -20,10 +20,11 @@ class ImageAnalyzer(context: Context) {
     }
 
     /**
-     * Bitmap analyze করো।
-     * @return true → block করো
+     * Analyze a bitmap using all loaded TFLite models.
+     * Returns true if adult content is detected (should block).
+     * Returns false on error to avoid false positives.
      */
-    suspend fun isAdultContent(bitmap: Bitmap): Boolean {
+    fun isAdultContent(bitmap: Bitmap): Boolean {
         if (!prefs.imageAnalysisEnabled) return false
         if (modelManager.getModelCount() == 0) {
             Log.w(TAG, "No models available")
@@ -32,9 +33,15 @@ class ImageAnalyzer(context: Context) {
         return try {
             modelManager.isAdultContent(bitmap, prefs.imageThreshold)
         } catch (e: Exception) {
-            Log.e(TAG, "Analysis error — skipping block", e)
-            false // Error হলে false দাও, false positive এড়াতে
+            Log.e(TAG, "Analysis error - skipping block", e)
+            false
         }
+    }
+
+    /** Reload all user models — call after a new model file is added. */
+    fun reloadModels() {
+        modelManager.loadAllModels()
+        Log.d(TAG, "Models reloaded: ${modelManager.getModelCount()} loaded")
     }
 
     fun close() {

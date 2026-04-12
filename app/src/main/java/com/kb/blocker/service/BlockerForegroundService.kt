@@ -11,14 +11,15 @@ import com.kb.blocker.R
 import com.kb.blocker.ui.MainActivity
 
 /**
- * Foreground Service — process কে high priority তে রাখে।
+ * Foreground Service - keeps the process at high priority.
  *
- * কেন দরকার?
- * AccessibilityService টা নিজে low-priority process এ থাকে।
- * এই service টা চালু থাকলে Android OS সহজে process kill করে না।
- * OEM battery killers (MIUI, OneUI, ColorOS) এর বিরুদ্ধে সুরক্ষা।
+ * Why needed:
+ * AccessibilityService alone runs in a low-priority process.
+ * With this foreground service active, Android OS is much less
+ * likely to kill the process. Helps against OEM battery killers
+ * (MIUI, OneUI, ColorOS, etc.).
  *
- * START_STICKY: killed হলে OS নিজে restart করে।
+ * START_STICKY: OS will restart this service if it is killed.
  */
 class BlockerForegroundService : Service() {
 
@@ -39,7 +40,7 @@ class BlockerForegroundService : Service() {
             .setContentText(getString(R.string.notification_text))
             .setSmallIcon(R.drawable.ic_shield)
             .setContentIntent(openPi)
-            .setOngoing(true)           // Swipe করে dismiss করা যাবে না
+            .setOngoing(true)
             .setCategory(Notification.CATEGORY_SERVICE)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()

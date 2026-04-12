@@ -15,16 +15,13 @@ import kotlin.concurrent.read
 import kotlin.concurrent.write
 
 /**
- * Multiple TFLite model manager.
+ * TFLite model manager - supports multiple models.
  *
- * লোড order:
- *   1. assets/saved_model.tflite  (default model)
- *   2. filesDir/models/*.tflite   (user-added models)
+ * Models loaded from: filesDir/models/ (user-added .tflite files)
  *
- * Inference strategy:
- *   - সব model combined চালায়
- *   - যেকোনো একটা "adult" বললেই block → true
- *   - কোনো model crash করলে পরেরটায় fallback
+ * Inference: all models run on each bitmap.
+ * Any model detecting adult content returns true (block).
+ * If one model fails, the next one is tried (fallback).
  */
 class ModelManager(private val context: Context) {
 
@@ -51,24 +48,20 @@ class ModelManager(private val context: Context) {
         loadAllModels()
     }
 
-    // ─── Public API ──────────────────────────────────────────────
+    // ---------- Public API ----------
 
-    /**
-     * সব model reload করো।
-     * User নতুন model add করার পর call করতে হবে।
-     */
     fun loadAllModels() {
         lock.write {
             models.forEach { safeClose(it.interpreter) }
             models.clear()
-            loadUserModels() // শুধু user-uploaded models (assets এ কোনো default নেই)
+            loadUserModels()
             Log.d(TAG, "${models.size} model(s) ready")
         }
     }
 
     /**
-     * Bitmap analyze করো — সব model দিয়ে।
-     * @return true যদি যেকোনো model threshold ছাড়িয়ে যায়
+     * Run all models on a bitmap.
+     * Returns true if any model scores >= threshold.
      */
     fun isAdultContent(bitmap: Bitmap, threshold: Float = 0.75f): Boolean {
         lock.read {
@@ -82,7 +75,6 @@ class ModelManager(private val context: Context) {
                     Log.d(TAG, "[${model.name}] score=$score threshold=$threshold")
                     if (score >= threshold) return true
                 } catch (e: Exception) {
-                    // এই model fail → পরেরটায় যাও (fallback)
                     Log.e(TAG, "Inference failed for '${model.name}', falling back", e)
                 }
             }
@@ -91,8 +83,7 @@ class ModelManager(private val context: Context) {
     }
 
     /**
-     * User নতুন TFLite file add করতে চাইলে এই function call করো।
-     * File টা internal storage এ copy হবে এবং সব model reload হবে।
+     * Copy a .tflite file into internal storage and reload all models.
      */
     fun addUserModel(sourceFile: File): Boolean {
         return try {
@@ -108,6 +99,7 @@ class ModelManager(private val context: Context) {
     }
 
     fun getModelCount(): Int = lock.read { models.size }
+
     fun getModelNames(): List<String> = lock.read { models.map { it.name } }
 
     fun close() {
@@ -117,11 +109,14 @@ class ModelManager(private val context: Context) {
         }
     }
 
-    // ─── Private helpers ─────────────────────────────────────────
+    // ---------- Private ----------
 
     private fun loadUserModels() {
         val dir = File(context.filesDir, MODELS_DIR)
-        if (!dir.exists()) { dir.mkdirs(); return }
+        if (!dir.exists()) {
+            dir.mkdirs()
+            return
+        }
         dir.listFiles { f -> f.extension == "tflite" || f.extension == "lite" }
             ?.forEach { file ->
                 try {
@@ -134,9 +129,6 @@ class ModelManager(private val context: Context) {
             }
     }
 
-    /**
-     * Interpreter তৈরি করো এবং input/output shape auto-detect করো।
-     */
     private fun createModel(name: String, buffer: MappedByteBuffer): TFModel? {
         return try {
             val opts = Interpreter.Options().apply {
@@ -145,7 +137,7 @@ class ModelManager(private val context: Context) {
             }
             val interp = Interpreter(buffer, opts)
 
-            // Input shape: [batch, H, W, C]
+            // Input shape: [batch, H, W, channels]
             val inShape = interp.getInputTensor(0).shape()
             val h = if (inShape.size >= 3) inShape[1] else 224
             val w = if (inShape.size >= 3) inShape[2] else 224
@@ -162,15 +154,11 @@ class ModelManager(private val context: Context) {
         }
     }
 
-    /**
-     * Single model inference।
-     * @return 0.0–1.0 adult confidence score
-     */
     private fun runInference(bitmap: Bitmap, model: TFModel): Float {
-        // Resize
-        val scaled = Bitmap.createScaledBitmap(bitmap, model.inputWidth, model.inputHeight, true)
+        val scaled = Bitmap.createScaledBitmap(
+            bitmap, model.inputWidth, model.inputHeight, true
+        )
 
-        // Bitmap → normalized float ByteBuffer
         val buf = ByteBuffer
             .allocateDirect(1 * model.inputHeight * model.inputWidth * RGB * FLOAT_BYTES)
             .order(ByteOrder.nativeOrder())
@@ -181,29 +169,27 @@ class ModelManager(private val context: Context) {
 
         for (px in pixels) {
             buf.putFloat(((px shr 16) and 0xFF) / 255f) // R
-            buf.putFloat(((px shr 8)  and 0xFF) / 255f) // G
-            buf.putFloat( (px         and 0xFF) / 255f) // B
+            buf.putFloat(((px shr 8) and 0xFF) / 255f)  // G
+            buf.putFloat((px and 0xFF) / 255f)           // B
         }
 
         val out = Array(1) { FloatArray(model.outputSize) }
         model.interpreter.run(buf, out)
-
-        return interpretScore(out[0], model.outputShape)
+        return interpretScore(out[0])
     }
 
     /**
-     * Output tensor → single confidence score।
-     *
-     * [1,1] → sigmoid binary output
-     * [1,2] → softmax [safe, adult], ambil index 1
-     * [1,N] → max value (worst case)
+     * Map raw output to a 0.0-1.0 adult confidence score.
+     * size 1: binary sigmoid   -> use directly
+     * size 2: softmax          -> take index 1 (adult class)
+     * size N: multi-class      -> take max value
      */
-    private fun interpretScore(output: FloatArray, shape: IntArray): Float {
+    private fun interpretScore(output: FloatArray): Float {
         if (output.isEmpty()) return 0f
         return when (output.size) {
-            1    -> output[0]        // Binary classifier
-            2    -> output[1]        // Softmax: class 1 = adult
-            else -> output.max()     // Multi-class: take highest
+            1 -> output[0]
+            2 -> output[1]
+            else -> output.max()
         }
     }
 

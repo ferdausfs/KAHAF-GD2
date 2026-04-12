@@ -1,7 +1,10 @@
 package com.kb.blocker.accessibility
 
 import android.accessibilityservice.AccessibilityService
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Bitmap
 import android.os.Build
 import android.os.Handler
@@ -22,14 +25,16 @@ class ContentBlockerService : AccessibilityService() {
     companion object {
         private const val TAG = "ContentBlockerService"
 
-        /** ServiceWatchdog এই flag দেখে service alive কিনা */
+        /** Broadcast action sent from MainActivity after a new model is added. */
+        const val ACTION_RELOAD_MODELS = "com.kb.blocker.RELOAD_MODELS"
+
         @Volatile
         var isRunning = false
     }
 
     /**
-     * SupervisorJob: একটা child coroutine crash করলে
-     * বাকিগুলো চলতে থাকবে — service মরবে না।
+     * SupervisorJob: if one child coroutine crashes, the rest keep running.
+     * The service stays alive even if a single coroutine fails.
      */
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
@@ -39,30 +44,37 @@ class ContentBlockerService : AccessibilityService() {
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    // Image analysis throttle — এর মধ্যে দ্বিতীয় analysis হবে না
+    // Minimum ms between two screenshot analyses (throttle)
     @Volatile private var lastImageTime = 0L
 
-    // Block চলাকালীন নতুন event ignore করো (loop prevent)
+    // While blocking, ignore new events to prevent a loop
     @Volatile private var isBlocking = false
 
-    // ─── Lifecycle ────────────────────────────────────────────────
+    // Receives ACTION_RELOAD_MODELS broadcast from MainActivity
+    private val modelReloadReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == ACTION_RELOAD_MODELS) {
+                Log.d(TAG, "Model reload broadcast received")
+                imageAnalyzer.reloadModels()
+            }
+        }
+    }
+
+    // ---------- Lifecycle ----------
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         isRunning = true
-        Log.d(TAG, "✅ Accessibility Service connected")
+        Log.d(TAG, "Accessibility Service connected")
 
         try {
             prefs = PrefsManager(this)
             textAnalyzer = TextAnalyzer(this)
             imageAnalyzer = ImageAnalyzer(this)
 
-            // DB থেকে keywords real-time observe করো
             observeKeywords()
-
-            // Foreground service চালু করো → process alive থাকবে
             startBlockerForegroundService()
-
+            registerModelReloadReceiver()
         } catch (e: Exception) {
             Log.e(TAG, "onServiceConnected error", e)
         }
@@ -78,26 +90,26 @@ class ContentBlockerService : AccessibilityService() {
                 AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED,
                 AccessibilityEvent.TYPE_VIEW_SCROLLED -> {
 
-                    // 1️⃣ Text analysis — fast, sync
+                    // 1. Text analysis — fast, runs on the binder thread
                     if (prefs.textAnalysisEnabled) {
                         analyzeText(event)
                     }
 
-                    // 2️⃣ Image analysis — API 30+, async, throttled
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
-                        prefs.imageAnalysisEnabled
+                    // 2. Image analysis — API 30+ only, throttled, async
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+                        && prefs.imageAnalysisEnabled
                     ) {
                         maybeAnalyzeImage()
                     }
                 }
             }
         } catch (e: Exception) {
-            // কখনো re-throw করব না — service এর stability সবার আগে
+            // Never re-throw — service stability is top priority
             Log.e(TAG, "Event error (caught, service continues)", e)
         }
     }
 
-    // ─── Text Analysis ────────────────────────────────────────────
+    // ---------- Text Analysis ----------
 
     private fun analyzeText(event: AccessibilityEvent) {
         val source = event.source ?: return
@@ -105,15 +117,16 @@ class ContentBlockerService : AccessibilityService() {
             val sb = StringBuilder()
             collectText(source, sb)
             if (sb.isNotEmpty() && textAnalyzer.containsBlockedContent(sb.toString())) {
-                Log.d(TAG, "🚫 Text block triggered")
+                Log.d(TAG, "Text block triggered")
                 performBlock()
             }
         } finally {
+            // Always recycle the root node to avoid memory leaks
             try { source.recycle() } catch (_: Exception) {}
         }
     }
 
-    /** Node tree থেকে সব visible text collect করো */
+    /** Recursively collect all visible text from the accessibility node tree. */
     private fun collectText(node: AccessibilityNodeInfo, sb: StringBuilder) {
         try {
             node.text?.let { sb.append(it).append(' ') }
@@ -130,7 +143,7 @@ class ContentBlockerService : AccessibilityService() {
         }
     }
 
-    // ─── Image Analysis ───────────────────────────────────────────
+    // ---------- Image Analysis ----------
 
     private fun maybeAnalyzeImage() {
         val now = System.currentTimeMillis()
@@ -144,7 +157,7 @@ class ContentBlockerService : AccessibilityService() {
                     mainExecutor,
                     object : TakeScreenshotCallback {
                         override fun onSuccess(result: ScreenshotResult) {
-                            handleScreenshot(result)
+                            processScreenshot(result)
                         }
                         override fun onFailure(errorCode: Int) {
                             Log.v(TAG, "Screenshot failed: $errorCode")
@@ -157,20 +170,20 @@ class ContentBlockerService : AccessibilityService() {
         }
     }
 
-    private fun handleScreenshot(result: ScreenshotResult) {
+    private fun processScreenshot(result: ScreenshotResult) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
 
         serviceScope.launch {
             var bmp: Bitmap? = null
             try {
-                // HardwareBuffer → software Bitmap (TFLite needs software)
+                // HardwareBuffer → software Bitmap (TFLite requires software-backed bitmap)
                 bmp = Bitmap.wrapHardwareBuffer(
                     result.hardwareBuffer,
                     result.colorSpace
                 )?.copy(Bitmap.Config.ARGB_8888, false)
 
                 if (bmp != null && imageAnalyzer.isAdultContent(bmp)) {
-                    Log.d(TAG, "🚫 Image block triggered")
+                    Log.d(TAG, "Image block triggered")
                     withContext(Dispatchers.Main) { performBlock() }
                 }
             } catch (e: Exception) {
@@ -182,11 +195,11 @@ class ContentBlockerService : AccessibilityService() {
         }
     }
 
-    // ─── Block Action ─────────────────────────────────────────────
+    // ---------- Block Action ----------
 
     /**
-     * Back press দিয়ে current app থেকে বের হয়ে যাও।
-     * 1 second পর isBlocking reset হয় — নতুন event গ্রহণ করবে।
+     * Press BACK to exit the current app.
+     * isBlocking is reset after 1 second to accept new events.
      */
     private fun performBlock() {
         if (isBlocking) return
@@ -195,18 +208,18 @@ class ContentBlockerService : AccessibilityService() {
         mainHandler.postDelayed({ isBlocking = false }, 1000L)
     }
 
-    // ─── DB Observe ───────────────────────────────────────────────
+    // ---------- DB Keyword Observer ----------
 
     private fun observeKeywords() {
         serviceScope.launch {
             try {
                 val dao = AppDatabase.getInstance(applicationContext).keywordDao()
 
-                // Initial load
+                // Initial load before real-time collection starts
                 val init = dao.getAllKeywordsSync()
                 textAnalyzer.updateKeywords(init.map { it.keyword })
 
-                // Real-time updates
+                // Collect real-time updates from Room Flow
                 dao.getAllKeywords().collect { list ->
                     textAnalyzer.updateKeywords(list.map { it.keyword })
                 }
@@ -216,7 +229,7 @@ class ContentBlockerService : AccessibilityService() {
         }
     }
 
-    // ─── Foreground Service ───────────────────────────────────────
+    // ---------- Foreground Service ----------
 
     private fun startBlockerForegroundService() {
         try {
@@ -231,17 +244,32 @@ class ContentBlockerService : AccessibilityService() {
         }
     }
 
-    // ─── Cleanup ──────────────────────────────────────────────────
+    // ---------- Model Reload Receiver ----------
+
+    private fun registerModelReloadReceiver() {
+        try {
+            val filter = IntentFilter(ACTION_RELOAD_MODELS)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(modelReloadReceiver, filter, RECEIVER_NOT_EXPORTED)
+            } else {
+                registerReceiver(modelReloadReceiver, filter)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "registerModelReloadReceiver error", e)
+        }
+    }
+
+    // ---------- Cleanup ----------
 
     override fun onInterrupt() {
-        // AccessibilityService নিজেই recover করে — এখানে কিছু করার নেই
-        Log.w(TAG, "⚠️ onInterrupt — system will auto-recover")
+        Log.w(TAG, "onInterrupt - system will auto-recover")
     }
 
     override fun onDestroy() {
         isRunning = false
-        Log.w(TAG, "⚠️ Service destroyed")
+        Log.w(TAG, "Service destroyed")
         serviceScope.cancel()
+        try { unregisterReceiver(modelReloadReceiver) } catch (_: Exception) {}
         try { imageAnalyzer.close() } catch (_: Exception) {}
         super.onDestroy()
     }
