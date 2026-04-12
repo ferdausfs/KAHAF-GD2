@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">KeywordBlocker</string>
+    <string name="accessibility_service_label">KeywordBlocker Service</string>
+    <string name="accessibility_description">Content blocking service that monitors and blocks unwanted content using text and AI image analysis</string>
+    <string name="accessibility_summary">Blocks unwanted content across all apps</string>
+    <string name="channel_name">KeywordBlocker</string>
+    <string name="channel_desc">Content blocking service notifications</string>
+    <string name="notification_title">KeywordBlocker Active</string>
+    <string name="notification_text">Monitoring content…</string>
+    <string name="watchdog_channel_name">Service Monitor</string>
+</resources>
