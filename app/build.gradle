@@ -13,15 +13,14 @@ android {
         targetSdk 34
         versionCode 1
         versionName "1.0.0"
-
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildTypes {
         debug {
             debuggable true
-            applicationIdSuffix ".debug"
-            versionNameSuffix "-debug"
+            // No applicationIdSuffix — keeps packageName consistent so
+            // accessibility service check works correctly in debug builds.
         }
         release {
             minifyEnabled true
@@ -31,20 +30,23 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_8
-        targetCompatibility JavaVersion.VERSION_1_8
+        // Must match the JDK used in GitHub Actions (JDK 17)
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
     }
 
     kotlinOptions {
-        jvmTarget = '1.8'
+        jvmTarget = '17'
     }
 
     buildFeatures {
-        viewBinding true
+        viewBinding false   // UI is built programmatically; no XML layouts
     }
 
-    // TFLite model is uploaded by the user at runtime (not bundled).
-    // No aaptOptions needed.
+    // TFLite model uploaded at runtime — not bundled in APK
+    androidResources {
+        noCompress 'tflite', 'lite'
+    }
 }
 
 dependencies {
@@ -56,17 +58,13 @@ dependencies {
     // TensorFlow Lite
     implementation 'org.tensorflow:tensorflow-lite:2.14.0'
     implementation 'org.tensorflow:tensorflow-lite-support:0.4.4'
-    implementation 'org.tensorflow:tensorflow-lite-gpu:2.14.0'
 
     // Coroutines
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
 
-    // ViewModel + LiveData
+    // Lifecycle
     implementation 'androidx.lifecycle:lifecycle-viewmodel-ktx:2.7.0'
     implementation 'androidx.lifecycle:lifecycle-livedata-ktx:2.7.0'
-
-    // DataStore (Preferences)
-    implementation 'androidx.datastore:datastore-preferences:1.0.0'
 
     testImplementation 'junit:junit:4.13.2'
     androidTestImplementation 'androidx.test.ext:junit:1.1.5'

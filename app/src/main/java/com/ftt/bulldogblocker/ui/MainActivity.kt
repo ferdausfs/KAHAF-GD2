@@ -14,6 +14,7 @@ import android.view.Gravity
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import com.ftt.bulldogblocker.admin.DeviceAdminReceiver
+import com.ftt.bulldogblocker.service.BlockerAccessibilityService
 import com.ftt.bulldogblocker.ml.ContentClassifier
 import com.ftt.bulldogblocker.service.BlockerForegroundService
 import kotlinx.coroutines.*
@@ -306,6 +307,8 @@ class MainActivity : AppCompatActivity() {
                     "✅ Model আপলোড সফল!", Toast.LENGTH_SHORT).show()
                 classifier?.close()
                 classifier = ContentClassifier(this@MainActivity).also { it.load() }
+                // Tell the running AccessibilityService to reload the classifier
+                sendBroadcast(android.content.Intent(BlockerAccessibilityService.ACTION_RELOAD_MODEL))
             } else {
                 Toast.makeText(this@MainActivity,
                     "❌ আপলোড ব্যর্থ", Toast.LENGTH_SHORT).show()

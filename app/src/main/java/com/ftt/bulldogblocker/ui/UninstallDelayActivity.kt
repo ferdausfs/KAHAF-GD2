@@ -8,17 +8,16 @@ import android.os.Bundle
 import android.os.CountDownTimer
 import android.view.Gravity
 import android.widget.*
+import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
 import com.ftt.bulldogblocker.admin.DeviceAdminReceiver
 
 /**
  * Uninstall Delay Screen — enforces a 60-second wait before uninstall.
  *
- * MUST extend AppCompatActivity — MaterialComponents theme requires it.
- *
  * Flow:
- *   User tries to uninstall → Accessibility intercepts → this screen opens
- *   → 60s countdown → "Proceed" button unlocks → admin deactivated → uninstall opens
+ *   User tries to uninstall -> Accessibility intercepts -> this screen opens
+ *   -> 60s countdown -> "Proceed" button unlocks -> admin deactivated -> uninstall dialog
  */
 class UninstallDelayActivity : AppCompatActivity() {
 
@@ -27,10 +26,9 @@ class UninstallDelayActivity : AppCompatActivity() {
         private const val TICK_MS  = 1_000L
     }
 
-    private lateinit var tvCountdown:  TextView
-    private lateinit var progressBar:  ProgressBar
-    private lateinit var btnCancel:    Button
-    private lateinit var btnProceed:   Button
+    private lateinit var tvCountdown : TextView
+    private lateinit var progressBar : ProgressBar
+    private lateinit var btnProceed  : Button
 
     private var timer: CountDownTimer? = null
     private var countdownDone = false
@@ -38,17 +36,33 @@ class UninstallDelayActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(buildLayout())
+        setupBackHandler()
         startCountdown()
     }
 
-    // ─── Layout ─────────────────────────────────────────────────────
+    override fun onDestroy() {
+        timer?.cancel()
+        super.onDestroy()
+    }
+
+    // Block hardware back button during countdown — use modern API
+    private fun setupBackHandler() {
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (countdownDone) {
+                    isEnabled = false
+                    onBackPressedDispatcher.onBackPressed()
+                }
+                // If countdown not done, silently consume the back press
+            }
+        })
+    }
 
     private fun buildLayout(): ScrollView {
         val scroll = ScrollView(this)
-
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            gravity     = Gravity.CENTER_HORIZONTAL
+            gravity = Gravity.CENTER_HORIZONTAL
             setPadding(56, 100, 56, 56)
             setBackgroundColor(Color.parseColor("#1A0000"))
             layoutParams = LinearLayout.LayoutParams(
@@ -63,35 +77,30 @@ class UninstallDelayActivity : AppCompatActivity() {
         )
 
         root.addView(TextView(this).apply {
-            text     = "🐶 Bulldog Blocker"
+            text = "Bulldog Blocker"
             textSize = 26f
             setTextColor(Color.WHITE)
-            gravity  = Gravity.CENTER
+            gravity = Gravity.CENTER
             layoutParams = lp()
         })
-
         root.addView(TextView(this).apply {
-            text     = "আনইনস্টল সুরক্ষা সক্রিয়"
+            text = "Uninstall Protection Active"
             textSize = 15f
             setTextColor(Color.parseColor("#AAAAAA"))
-            gravity  = Gravity.CENTER
+            gravity = Gravity.CENTER
             setPadding(0, 8, 0, 40)
             layoutParams = lp()
         })
-
         root.addView(TextView(this).apply {
-            text = "⚠️ আনইনস্টল করতে চাইলে নিচে অপেক্ষা করুন।\n" +
-                   "আপনার সন্তানের সুরক্ষা সরিয়ে ফেলার আগে নিশ্চিত হন।"
+            text = "Please wait before proceeding.\nMake sure you want to remove content protection."
             textSize = 14f
             setTextColor(Color.parseColor("#FF9800"))
-            gravity  = Gravity.CENTER
+            gravity = Gravity.CENTER
             setPadding(0, 0, 0, 32)
             layoutParams = lp()
         })
 
-        progressBar = ProgressBar(
-            this, null, android.R.attr.progressBarStyleHorizontal
-        ).apply {
+        progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
             max = (DELAY_MS / TICK_MS).toInt()
             progress = 0
             layoutParams = lp()
@@ -99,36 +108,33 @@ class UninstallDelayActivity : AppCompatActivity() {
         root.addView(progressBar)
 
         tvCountdown = TextView(this).apply {
-            text     = "${DELAY_MS / 1000} সেকেন্ড বাকি..."
+            text = "${DELAY_MS / 1000} seconds remaining..."
             textSize = 18f
             setTextColor(Color.WHITE)
-            gravity  = Gravity.CENTER
+            gravity = Gravity.CENTER
             setPadding(0, 16, 0, 48)
             layoutParams = lp()
         }
         root.addView(tvCountdown)
 
-        btnCancel = Button(this).apply {
-            text = "❌ বাতিল — সুরক্ষিত থাকুন"
+        root.addView(Button(this).apply {
+            text = "Cancel — Stay Protected"
             setBackgroundColor(Color.parseColor("#2E7D32"))
             setTextColor(Color.WHITE)
             layoutParams = lp()
             setOnClickListener { finish() }
-        }
-        root.addView(btnCancel)
+        })
 
-        // spacer
         root.addView(android.view.View(this).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, 16)
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 16)
         })
 
         btnProceed = Button(this).apply {
-            text     = "আনইনস্টল করুন (অপেক্ষা করুন...)"
+            text = "Uninstall (please wait...)"
             setBackgroundColor(Color.parseColor("#C62828"))
             setTextColor(Color.WHITE)
             isEnabled = false
-            alpha     = 0.4f
+            alpha = 0.4f
             layoutParams = lp()
             setOnClickListener { proceedWithUninstall() }
         }
@@ -138,55 +144,36 @@ class UninstallDelayActivity : AppCompatActivity() {
         return scroll
     }
 
-    // ─── Countdown ──────────────────────────────────────────────────
-
     private fun startCountdown() {
         val totalTicks = (DELAY_MS / TICK_MS).toInt()
         timer = object : CountDownTimer(DELAY_MS, TICK_MS) {
             override fun onTick(ms: Long) {
                 val secs = ms / 1000
-                tvCountdown.text = "$secs সেকেন্ড বাকি..."
+                tvCountdown.text = "$secs seconds remaining..."
                 progressBar.progress = totalTicks - secs.toInt()
             }
             override fun onFinish() {
-                tvCountdown.text = "✅ এখন আনইনস্টল করতে পারবেন"
+                tvCountdown.text = "You may now uninstall"
                 progressBar.progress = totalTicks
                 btnProceed.isEnabled = true
-                btnProceed.alpha     = 1f
-                btnProceed.text      = "আনইনস্টল করুন"
+                btnProceed.alpha = 1f
+                btnProceed.text = "Uninstall"
                 countdownDone = true
             }
         }.start()
     }
 
-    // ─── Proceed ────────────────────────────────────────────────────
-
     private fun proceedWithUninstall() {
         if (!countdownDone) return
-        // Step 1: Remove Device Admin (required before uninstall)
         try {
             val dpm = getSystemService(DEVICE_POLICY_SERVICE) as DevicePolicyManager
             dpm.removeActiveAdmin(DeviceAdminReceiver.getComponentName(this))
-        } catch (e: Exception) { /* already removed */ }
+        } catch (_: Exception) {}
 
-        // Step 2: Open system uninstall dialog
         startActivity(Intent(Intent.ACTION_DELETE).apply {
             data = Uri.parse("package:${packageName}")
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         })
         finish()
-    }
-
-    // ─── Lifecycle ──────────────────────────────────────────────────
-
-    override fun onBackPressed() {
-        // Block back button during countdown
-        if (!countdownDone) return
-        super.onBackPressed()
-    }
-
-    override fun onDestroy() {
-        timer?.cancel()
-        super.onDestroy()
     }
 }
