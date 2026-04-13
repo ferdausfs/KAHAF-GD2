@@ -20,15 +20,18 @@ import com.ftt.bulldogblocker.admin.DeviceAdminReceiver
 import com.ftt.bulldogblocker.ml.ContentClassifier
 import com.ftt.bulldogblocker.service.BlockerAccessibilityService
 import com.ftt.bulldogblocker.service.BlockerForegroundService
+import android.media.projection.MediaProjectionManager
+import com.ftt.bulldogblocker.service.MediaProjectionCaptureService
 import kotlinx.coroutines.*
 import java.io.FileOutputStream
 
 class MainActivity : AppCompatActivity() {
 
     companion object {
-        private const val REQ_ADMIN      = 101
-        private const val REQ_MODEL_PICK = 102
-        private const val REQ_IMAGE_PICK = 103
+        private const val REQ_ADMIN        = 101
+        private const val REQ_MODEL_PICK   = 102
+        private const val REQ_IMAGE_PICK   = 103
+        private const val REQ_MEDIA_PROJ   = 104
     }
 
     private lateinit var tvOverallStatus : TextView
@@ -39,6 +42,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvModelStatus   : TextView
     private lateinit var tvModelInfo     : TextView
     private lateinit var tvMlScanStatus  : TextView
+    private lateinit var tvVideoScanStatus : TextView
+    private lateinit var btnVideoScan    : Button
     private lateinit var btnUploadModel  : Button
     private lateinit var ivTestImage     : ImageView
     private lateinit var btnPickImage    : Button
@@ -162,6 +167,22 @@ class MainActivity : AppCompatActivity() {
             addView(llWhitelist)
             addView(gap(8))
             addView(btn("➕  App যোগ করুন", "#1A237E") { showAppPicker(isBlacklist = false) })
+        })
+
+        root.addView(gap(24))
+
+        // ── Video Scan (MediaProjection) ─────────────────────────────
+        root.addView(sectionLabel("🎥 VIDEO SCAN (Optional)"))
+        root.addView(card().apply {
+            addView(tv("Video content-ও ML দিয়ে block করুন", size = 15f, color = "#FFFFFF"))
+            addView(gap(4))
+            addView(tv("চালু করলে একবার system permission dialog আসবে", size = 12f, color = "#AAAAAA"))
+            addView(gap(10))
+            tvVideoScanStatus = tv("", size = 13f)
+            addView(tvVideoScanStatus)
+            addView(gap(10))
+            btnVideoScan = btn("🎥 Video Scan চালু করুন", "#4A148C") { toggleVideoScan() }
+            addView(btnVideoScan)
         })
 
         root.addView(gap(24))
@@ -403,6 +424,14 @@ class MainActivity : AppCompatActivity() {
             tvMlScanStatus.setTextColor(Color.parseColor("#FF9800"))
         }
 
+        // Video scan status
+        val videoOn = MediaProjectionCaptureService.isEnabled(this)
+        tvVideoScanStatus.text = if (videoOn) "✅ চালু — video frame ML দিয়ে scan হচ্ছে"
+                                 else          "⭕ বন্ধ — video content scan হচ্ছে না"
+        tvVideoScanStatus.setTextColor(Color.parseColor(if (videoOn) "#4CAF50" else "#888888"))
+        btnVideoScan.text = if (videoOn) "⏹ Video Scan বন্ধ করুন" else "🎥 Video Scan চালু করুন"
+        btnVideoScan.setBackgroundColor(Color.parseColor(if (videoOn) "#B71C1C" else "#4A148C"))
+
         tvOverallStatus.text = if (adminOk && accessOk && modelOk) "🛡️ সম্পূর্ণ সুরক্ষিত" else "⚠️ সেটআপ অসম্পূর্ণ"
         tvOverallStatus.setTextColor(Color.parseColor(if (adminOk && accessOk && modelOk) "#4CAF50" else "#FF9800"))
     }
@@ -505,6 +534,20 @@ class MainActivity : AppCompatActivity() {
     // PERMISSIONS
     // ════════════════════════════════════════════════════════════════
 
+    private fun toggleVideoScan() {
+        val isOn = MediaProjectionCaptureService.isEnabled(this)
+        if (isOn) {
+            // বন্ধ করো
+            MediaProjectionCaptureService.setEnabled(this, false)
+            MediaProjectionCaptureService.stop(this)
+            refreshStatus()
+        } else {
+            // চালু করো — permission dialog
+            val mgr = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            startActivityForResult(mgr.createScreenCaptureIntent(), REQ_MEDIA_PROJ)
+        }
+    }
+
     private fun requestDeviceAdmin() {
         val intent = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
             putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, DeviceAdminReceiver.getComponentName(this@MainActivity))
@@ -530,6 +573,20 @@ class MainActivity : AppCompatActivity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+
+        // MediaProjection: data একটা Intent (Uri নয়)
+        if (requestCode == REQ_MEDIA_PROJ) {
+            if (resultCode == Activity.RESULT_OK && data != null) {
+                MediaProjectionCaptureService.setEnabled(this, true)
+                MediaProjectionCaptureService.start(this, resultCode, data)
+                refreshStatus()
+                Toast.makeText(this, "🎥 Video Scan চালু হয়েছে", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "Permission দেওয়া হয়নি", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+
         if (resultCode != Activity.RESULT_OK) return
         val uri = data?.data ?: return
         when (requestCode) {
@@ -542,7 +599,12 @@ class MainActivity : AppCompatActivity() {
                 tvTestResult.setTextColor(Color.parseColor("#AAAAAA"))
                 tvTestResult.setBackgroundColor(Color.parseColor("#1A1A1A"))
             }
-            REQ_ADMIN -> refreshStatus()
+            REQ_MEDIA_PROJ -> {
+                MediaProjectionCaptureService.setEnabled(this, true)
+                MediaProjectionCaptureService.start(this, resultCode, uri ?: return)
+                refreshStatus()
+                Toast.makeText(this, "🎥 Video Scan চালু হয়েছে", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
