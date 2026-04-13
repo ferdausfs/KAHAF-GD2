@@ -1,5 +1,5 @@
 <resources>
     <string name="app_name">Bulldog Blocker</string>
     <string name="accessibility_service_label">Bulldog Content Blocker</string>
-    <string name="accessibility_service_description">Monitors screen content to block adult material in real time.</string>
+    <string name="accessibility_service_description">Real-time adult content blocking — monitors screen and browser URLs.</string>
 </resources>

@@ -4,5 +4,6 @@
     <style name="Theme.BulldogBlocker.Fullscreen" parent="Theme.MaterialComponents.DayNight.NoActionBar">
         <item name="android:windowFullscreen">true</item>
         <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowBackground">@android:color/black</item>
     </style>
 </resources>

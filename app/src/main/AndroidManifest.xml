@@ -3,8 +3,6 @@
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- ─── Permissions ─── -->
-    <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
@@ -12,23 +10,21 @@
     <uses-permission android:name="android.permission.BIND_DEVICE_ADMIN" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
-    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
-        tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
-    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
 
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"
         android:theme="@style/Theme.BulldogBlocker"
         android:supportsRtl="true"
         tools:replace="android:allowBackup">
 
-        <!-- ─── Main Activity ─── -->
         <activity
             android:name=".ui.MainActivity"
             android:exported="true"
@@ -39,7 +35,6 @@
             </intent-filter>
         </activity>
 
-        <!-- ─── Uninstall Delay Screen ─── -->
         <activity
             android:name=".ui.UninstallDelayActivity"
             android:exported="true"
@@ -53,13 +48,11 @@
             </intent-filter>
         </activity>
 
-        <!-- ─── Block Screen Overlay ─── -->
         <activity
             android:name=".ui.BlockScreenActivity"
             android:exported="false"
             android:theme="@style/Theme.BulldogBlocker.Fullscreen" />
 
-        <!-- ─── Device Admin Receiver ─── -->
         <receiver
             android:name=".admin.DeviceAdminReceiver"
             android:exported="true"
@@ -74,7 +67,6 @@
             </intent-filter>
         </receiver>
 
-        <!-- ─── Accessibility Service ─── -->
         <service
             android:name=".service.BlockerAccessibilityService"
             android:exported="true"
@@ -88,14 +80,11 @@
                 android:resource="@xml/accessibility_service" />
         </service>
 
-        <!-- ─── Foreground Blocker Service ─── -->
-        <!-- dataSync type: no Play Store approval needed, works on all API 26+ -->
         <service
             android:name=".service.BlockerForegroundService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
-        <!-- ─── Boot Receiver ─── -->
         <receiver
             android:name=".receiver.BootReceiver"
             android:exported="true">

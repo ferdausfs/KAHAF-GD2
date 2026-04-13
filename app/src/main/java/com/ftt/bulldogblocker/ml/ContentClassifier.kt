@@ -14,10 +14,10 @@ import java.nio.channels.FileChannel
  * TFLite adult content classifier.
  *
  * Model is NOT bundled in the APK.
- * The user uploads saved_model.tflite via the app UI.
- * It is saved to: context.filesDir/saved_model.tflite
+ * User uploads saved_model.tflite via the app UI.
+ * Saved to: context.filesDir/saved_model.tflite
  *
- * Expected output shape: [1][2] -> [safe_score, unsafe_score]
+ * Expected output shape: [1][2] → [safe_score, unsafe_score]
  */
 class ContentClassifier(private val context: Context) {
 
@@ -29,29 +29,35 @@ class ContentClassifier(private val context: Context) {
     )
 
     companion object {
-        const val MODEL_FILENAME    = "saved_model.tflite"
+        const val MODEL_FILENAME   = "saved_model.tflite"
         private const val INPUT_SIZE      = 224
         private const val ADULT_THRESHOLD = 0.60f
 
         fun modelFile(ctx: Context): File = File(ctx.filesDir, MODEL_FILENAME)
         fun isReady(ctx: Context): Boolean =
-            modelFile(ctx).exists() && modelFile(ctx).length() > 0
+            modelFile(ctx).let { it.exists() && it.length() > 0 }
     }
 
     private var interpreter: Interpreter? = null
 
-    /** Load the interpreter from internal storage. Returns true on success. */
+    /**
+     * Load the interpreter from internal storage.
+     * Returns true on success.
+     */
     fun load(): Boolean = try {
         val file = modelFile(context)
-        if (!file.exists()) false
-        else {
+        if (!file.exists()) {
+            false
+        } else {
             val buf = loadMapped(file)
-            interpreter = Interpreter(buf, Interpreter.Options().apply {
+            // ⚠️ BUG FIX: useXNNPACK is Java-only setter (no getter) in TFLite 2.14.0.
+            // Kotlin property assignment (useXNNPACK = true) requires both getter + setter.
+            // Fix: call setUseXNNPACK(true) directly, or omit (XNNPACK is on by default).
+            val options = Interpreter.Options().apply {
                 numThreads = 2
-                // useNNAPI is deprecated and crashes on many devices.
-                // useXNNPACK is the correct modern replacement.
-                useXNNPACK = true
-            })
+                setUseXNNPACK(true)   // ← correct way to call Java-only setter in Kotlin
+            }
+            interpreter = Interpreter(buf, options)
             true
         }
     } catch (e: Exception) {
@@ -60,12 +66,12 @@ class ContentClassifier(private val context: Context) {
     }
 
     /**
-     * Classify a bitmap. Call load() first.
-     * This is a blocking call — run it on a background thread.
+     * Classify a bitmap.
+     * Call load() first. This is a blocking call — run on a background thread.
      */
     fun classify(bitmap: Bitmap): Result {
         val interp = interpreter
-            ?: return Result(1f, 0f, false, "Model not loaded")
+            ?: return Result(1f, 0f, false, "Model লোড হয়নি")
 
         val input  = bitmapToBuffer(bitmap)
         val output = Array(1) { FloatArray(2) }
@@ -80,9 +86,9 @@ class ContentClassifier(private val context: Context) {
             unsafeScore = unsafe,
             isAdult     = adult,
             label = if (adult)
-                "Adult content — ${(unsafe * 100).toInt()}% confidence"
+                "🚫 Adult Content — ${(unsafe * 100).toInt()}% নিশ্চিত"
             else
-                "Safe — ${(safe * 100).toInt()}% confidence"
+                "✅ নিরাপদ — ${(safe * 100).toInt()}% নিশ্চিত"
         )
     }
 
@@ -93,10 +99,9 @@ class ContentClassifier(private val context: Context) {
         interpreter = null
     }
 
-    // --- Helpers ---
+    // ─── Helpers ────────────────────────────────────────────────────
 
     private fun bitmapToBuffer(src: Bitmap): ByteBuffer {
-        // Scale to model input size
         val bmp = Bitmap.createScaledBitmap(src, INPUT_SIZE, INPUT_SIZE, true)
 
         val buf = ByteBuffer
@@ -106,7 +111,6 @@ class ContentClassifier(private val context: Context) {
         val pix = IntArray(INPUT_SIZE * INPUT_SIZE)
         bmp.getPixels(pix, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE)
 
-        // Recycle the scaled copy if it is a new bitmap (not the original)
         if (bmp !== src) bmp.recycle()
 
         for (p in pix) {
@@ -119,8 +123,6 @@ class ContentClassifier(private val context: Context) {
     }
 
     private fun loadMapped(f: File): MappedByteBuffer {
-        // Open a channel, map it, then close the stream.
-        // The MappedByteBuffer remains valid after the channel is closed.
         val fis = FileInputStream(f)
         return fis.channel.use { ch ->
             ch.map(FileChannel.MapMode.READ_ONLY, 0, ch.size())

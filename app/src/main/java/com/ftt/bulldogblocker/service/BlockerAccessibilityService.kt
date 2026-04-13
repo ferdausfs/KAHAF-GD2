@@ -1,7 +1,10 @@
 package com.ftt.bulldogblocker.service
 
 import android.accessibilityservice.AccessibilityService
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Bitmap
 import android.os.Build
 import android.os.Handler
@@ -13,23 +16,20 @@ import android.view.accessibility.AccessibilityNodeInfo
 import com.ftt.bulldogblocker.ml.ContentClassifier
 import com.ftt.bulldogblocker.ui.BlockScreenActivity
 import com.ftt.bulldogblocker.ui.UninstallDelayActivity
-import android.content.BroadcastReceiver
-import android.content.IntentFilter
 import kotlinx.coroutines.*
 
 /**
- * Accessibility Service with two responsibilities:
+ * Accessibility Service — три рівні блокування:
  *
- * 1. SCREENSHOT ML BLOCKING (API 30+):
- *    Captures the screen every 500 ms and runs the TFLite model.
- *    If adult content is detected → launches BlockScreenActivity.
+ * 1. ML SCREENSHOT BLOCKING (Android 11 / API 30+)
+ *    Screenshots every 500ms → TFLite model → block if adult.
  *
- * 2. URL TEXT BLOCKING (all APIs):
- *    Watches browser address bars for adult keywords/domains.
- *    Uses debounce so it does NOT spam BACK press.
+ * 2. URL TEXT BLOCKING (all APIs)
+ *    Watches browser address bars for adult keywords / domains.
+ *    Debounced so it does NOT spam BACK on every keystroke.
  *
- * 3. UNINSTALL INTERCEPTION:
- *    Watches package installer / Settings for our package name.
+ * 3. UNINSTALL INTERCEPTION
+ *    Watches package installer & Settings for our package.
  *    Redirects to UninstallDelayActivity (60-second countdown).
  */
 class BlockerAccessibilityService : AccessibilityService() {
@@ -38,15 +38,9 @@ class BlockerAccessibilityService : AccessibilityService() {
         private const val TAG = "BDB_Accessibility"
         private const val OUR_PACKAGE = "com.ftt.bulldogblocker"
 
-        // How often to capture a screenshot and run the ML model (ms)
         private const val SCREENSHOT_INTERVAL_MS = 500L
-
-        // Minimum time between two block actions (ms)
-        // Prevents BACK from being spammed while the user is still typing
-        private const val BLOCK_COOLDOWN_MS = 3000L
-
-        // Debounce delay for URL bar text changes (ms)
-        private const val URL_DEBOUNCE_MS = 600L
+        private const val BLOCK_COOLDOWN_MS       = 3_000L
+        private const val URL_DEBOUNCE_MS         = 600L
 
         private val BROWSER_PACKAGES = setOf(
             "com.android.chrome",
@@ -55,7 +49,9 @@ class BlockerAccessibilityService : AccessibilityService() {
             "com.brave.browser",
             "com.microsoft.emmx",
             "com.UCMobile.intl",
-            "com.sec.android.app.sbrowser"
+            "com.sec.android.app.sbrowser",
+            "com.kiwibrowser.browser",
+            "org.mozilla.firefox_beta"
         )
 
         private val INSTALLER_PACKAGES = setOf(
@@ -69,35 +65,26 @@ class BlockerAccessibilityService : AccessibilityService() {
         private val BLOCKED_KEYWORDS = listOf(
             "porn", "xxx", "adult", "sex", "nude", "nsfw",
             "hentai", "erotic", "xvideos", "xhamster", "pornhub",
-            "redtube", "youporn", "onlyfans", "chaturbate"
+            "redtube", "youporn", "onlyfans", "chaturbate",
+            "xnxx", "xnxx.com", "brazzers", "bangbros"
         )
     }
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
-    private val mainHandler = Handler(Looper.getMainLooper())
+    private val mainHandler   = Handler(Looper.getMainLooper())
 
-    // Shared classifier instance — loaded once, reused for every screenshot
     private var classifier: ContentClassifier? = null
     private var classifierLoaded = false
 
-    // Prevents overlapping screenshot+inference jobs
-    @Volatile private var screenshotBusy = false
-
-    // Timestamp of last block action — used for cooldown
-    @Volatile private var lastBlockTime = 0L
-
-    // Uninstall interception cooldown — prevents spamming the delay screen
+    @Volatile private var screenshotBusy    = false
+    @Volatile private var lastBlockTime     = 0L
     @Volatile private var lastUninstallTime = 0L
 
-    // Debounce job for URL bar changes
-    private var urlDebounceJob: Job? = null
+    private var urlDebounceJob:  Job? = null
+    private var screenshotJob:   Job? = null
 
-    // Continuous screenshot loop job
-    private var screenshotJob: Job? = null
-
-    // Receives ACTION_RELOAD_MODEL broadcast from MainActivity after model upload
     private val modelReloadReceiver = object : BroadcastReceiver() {
-        override fun onReceive(ctx: android.content.Context?, intent: android.content.Intent?) {
+        override fun onReceive(ctx: Context?, intent: Intent?) {
             if (intent?.action == ACTION_RELOAD_MODEL) {
                 Log.d(TAG, "Model reload broadcast received")
                 classifierLoaded = false
@@ -108,7 +95,7 @@ class BlockerAccessibilityService : AccessibilityService() {
         }
     }
 
-    // ---------- Lifecycle ----------
+    // ─── Lifecycle ──────────────────────────────────────────────────
 
     override fun onServiceConnected() {
         Log.d(TAG, "Accessibility service connected")
@@ -122,9 +109,9 @@ class BlockerAccessibilityService : AccessibilityService() {
         val pkg = event.packageName?.toString() ?: return
 
         when {
-            pkg in INSTALLER_PACKAGES -> handleUninstallViaInstaller(event)
+            pkg in INSTALLER_PACKAGES     -> handleUninstallViaInstaller(event)
             pkg == "com.android.settings" -> handleUninstallViaSettings(event)
-            pkg in BROWSER_PACKAGES -> handleBrowserEvent(event)
+            pkg in BROWSER_PACKAGES       -> handleBrowserEvent(event)
         }
     }
 
@@ -143,7 +130,7 @@ class BlockerAccessibilityService : AccessibilityService() {
         Log.d(TAG, "Service destroyed")
     }
 
-    // ---------- Classifier ----------
+    // ─── Classifier ─────────────────────────────────────────────────
 
     private fun loadClassifier() {
         if (classifierLoaded) return
@@ -152,53 +139,35 @@ class BlockerAccessibilityService : AccessibilityService() {
             classifierLoaded = c.load()
             if (classifierLoaded) {
                 classifier = c
-                Log.d(TAG, "ContentClassifier loaded successfully")
+                Log.d(TAG, "ContentClassifier loaded")
             } else {
                 Log.w(TAG, "ContentClassifier load failed — model not uploaded yet")
             }
         }
     }
 
-    // ---------- Continuous Screenshot Loop ----------
+    // ─── Screenshot Loop ─────────────────────────────────────────────
 
-    /**
-     * Captures a screenshot every SCREENSHOT_INTERVAL_MS and runs the ML model.
-     * Only runs on Android 11+ (API 30) where takeScreenshot() is available.
-     * If the model is not loaded yet, the loop runs silently and retries loading.
-     */
     private fun startScreenshotLoop() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
             Log.w(TAG, "Screenshot API requires Android 11+. ML blocking disabled.")
             return
         }
-
         screenshotJob?.cancel()
         screenshotJob = serviceScope.launch {
             while (isActive) {
                 delay(SCREENSHOT_INTERVAL_MS)
-
-                // Skip if in block cooldown
                 if (System.currentTimeMillis() - lastBlockTime < BLOCK_COOLDOWN_MS) continue
-
-                // Skip if a previous screenshot is still being processed
                 if (screenshotBusy) continue
-
-                // If model not loaded, try again
-                if (!classifierLoaded) {
-                    loadClassifier()
-                    continue
-                }
-
+                if (!classifierLoaded) { loadClassifier(); continue }
                 captureAndAnalyze()
             }
         }
-        Log.d(TAG, "Screenshot loop started (interval: ${SCREENSHOT_INTERVAL_MS}ms)")
     }
 
     private fun captureAndAnalyze() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
         screenshotBusy = true
-
         try {
             takeScreenshot(
                 Display.DEFAULT_DISPLAY,
@@ -209,7 +178,6 @@ class BlockerAccessibilityService : AccessibilityService() {
                     }
                     override fun onFailure(errorCode: Int) {
                         screenshotBusy = false
-                        Log.v(TAG, "Screenshot failed: $errorCode")
                     }
                 }
             )
@@ -221,11 +189,9 @@ class BlockerAccessibilityService : AccessibilityService() {
 
     private fun processScreenshot(result: ScreenshotResult) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
-
         serviceScope.launch {
             var bmp: Bitmap? = null
             try {
-                // Convert HardwareBuffer to a software-backed Bitmap for TFLite
                 bmp = Bitmap.wrapHardwareBuffer(
                     result.hardwareBuffer,
                     result.colorSpace
@@ -234,12 +200,10 @@ class BlockerAccessibilityService : AccessibilityService() {
                 val c = classifier
                 if (bmp != null && c != null && classifierLoaded) {
                     val classification = c.classify(bmp)
-                    Log.v(TAG, "ML: ${classification.label}")
-
                     if (classification.isAdult) {
                         Log.w(TAG, "Adult content detected — blocking")
                         withContext(Dispatchers.Main) {
-                            triggerBlock("ML model detected adult content")
+                            triggerBlock("ML: adult content শনাক্ত হয়েছে")
                         }
                     }
                 }
@@ -253,17 +217,12 @@ class BlockerAccessibilityService : AccessibilityService() {
         }
     }
 
-    // ---------- Block Action ----------
+    // ─── Block Action ────────────────────────────────────────────────
 
-    /**
-     * Press BACK and launch BlockScreenActivity.
-     * Respects BLOCK_COOLDOWN_MS to prevent repeated triggers.
-     */
     private fun triggerBlock(reason: String) {
         val now = System.currentTimeMillis()
         if (now - lastBlockTime < BLOCK_COOLDOWN_MS) return
         lastBlockTime = now
-
         performGlobalAction(GLOBAL_ACTION_BACK)
         launchBlockScreen(reason)
     }
@@ -279,7 +238,7 @@ class BlockerAccessibilityService : AccessibilityService() {
         }
     }
 
-    // ---------- Uninstall Interception ----------
+    // ─── Uninstall Interception ──────────────────────────────────────
 
     private fun handleUninstallViaInstaller(event: AccessibilityEvent) {
         val root = rootInActiveWindow ?: return
@@ -290,7 +249,6 @@ class BlockerAccessibilityService : AccessibilityService() {
                 launchUninstallDelay()
             }
         } finally {
-            // MUST recycle rootInActiveWindow to prevent memory leaks
             root.recycle()
         }
     }
@@ -310,7 +268,7 @@ class BlockerAccessibilityService : AccessibilityService() {
 
     private fun launchUninstallDelay() {
         val now = System.currentTimeMillis()
-        if (now - lastUninstallTime < 5000L) return  // Debounce: max once per 5s
+        if (now - lastUninstallTime < 5_000L) return
         lastUninstallTime = now
         try {
             startActivity(Intent(this, UninstallDelayActivity::class.java).apply {
@@ -321,23 +279,15 @@ class BlockerAccessibilityService : AccessibilityService() {
         }
     }
 
-    // ---------- Browser URL Blocking ----------
+    // ─── Browser URL Blocking ────────────────────────────────────────
 
-    /**
-     * Debounced URL check.
-     * Cancels any pending check and restarts the timer after URL_DEBOUNCE_MS.
-     * This prevents spamming BACK on every keystroke while typing in the address bar.
-     */
     private fun handleBrowserEvent(event: AccessibilityEvent) {
-        // Only react to text/content changes, not every window event
         if (event.eventType != AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED &&
             event.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) return
 
         urlDebounceJob?.cancel()
         urlDebounceJob = serviceScope.launch {
             delay(URL_DEBOUNCE_MS)
-
-            // Respect cooldown
             if (System.currentTimeMillis() - lastBlockTime < BLOCK_COOLDOWN_MS) return@launch
 
             val root = rootInActiveWindow ?: return@launch
@@ -346,11 +296,10 @@ class BlockerAccessibilityService : AccessibilityService() {
                 if (BLOCKED_KEYWORDS.any { urlText.contains(it) }) {
                     Log.w(TAG, "Blocked URL: $urlText")
                     withContext(Dispatchers.Main) {
-                        triggerBlock("Blocked website: $urlText")
+                        triggerBlock("ব্লক করা সাইট: $urlText")
                     }
                 }
             } finally {
-                // MUST recycle to prevent memory leaks
                 root.recycle()
             }
         }
@@ -361,13 +310,13 @@ class BlockerAccessibilityService : AccessibilityService() {
             "com.android.chrome:id/url_bar",
             "com.android.chrome:id/search_box_text",
             "org.mozilla.firefox:id/mozac_browser_toolbar_url_view",
-            "com.brave.browser:id/url_bar"
+            "com.brave.browser:id/url_bar",
+            "com.microsoft.emmx:id/url_bar"
         )
         for (id in urlBarIds) {
             val nodes = root.findAccessibilityNodeInfosByViewId(id)
             if (nodes.isNotEmpty()) {
                 val text = nodes[0].text?.toString()
-                // Recycle all found nodes
                 nodes.forEach { it.recycle() }
                 if (text != null) return text
             }
@@ -380,13 +329,13 @@ class BlockerAccessibilityService : AccessibilityService() {
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
             val result = findEditableText(child)
-            child.recycle()   // Recycle every child after traversal
+            child.recycle()
             if (result != null) return result
         }
         return null
     }
 
-    // ---------- Model Reload Receiver ----------
+    // ─── Model Reload Receiver ───────────────────────────────────────
 
     private fun registerModelReloadReceiver() {
         try {
@@ -402,12 +351,8 @@ class BlockerAccessibilityService : AccessibilityService() {
         }
     }
 
-    // ---------- Helper ----------
+    // ─── Helpers ────────────────────────────────────────────────────
 
-    /**
-     * Collect all visible text from a node tree.
-     * Recycles every child node after traversal to prevent memory leaks.
-     */
     private fun collectAllText(node: AccessibilityNodeInfo): String {
         val sb = StringBuilder()
         fun traverse(n: AccessibilityNodeInfo?) {
@@ -417,7 +362,7 @@ class BlockerAccessibilityService : AccessibilityService() {
             for (i in 0 until n.childCount) {
                 val child = n.getChild(i) ?: continue
                 traverse(child)
-                child.recycle()  // Recycle after use
+                child.recycle()
             }
         }
         traverse(node)
