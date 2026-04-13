@@ -9,6 +9,8 @@ import android.view.Display
 import androidx.annotation.RequiresApi
 import com.ftt.bulldogblocker.ThresholdManager
 import com.ftt.bulldogblocker.ml.ContentClassifier
+import com.ftt.bulldogblocker.ml.FalsePositiveDB
+import com.ftt.bulldogblocker.ml.ImageHashUtil
 import kotlinx.coroutines.*
 
 /**
@@ -19,7 +21,8 @@ import kotlinx.coroutines.*
 class ScreenshotBlocker(
     private val service: AccessibilityService,
     private val scope: CoroutineScope,
-    private val onAdultDetected: (String) -> Unit
+    // reason, imageHash, unsafeScore, showReportButtons
+    private val onAdultDetected: (String, Long, Float, Boolean) -> Unit
 ) {
     companion object {
         private const val TAG = "BDB_Screenshot"
@@ -31,8 +34,12 @@ class ScreenshotBlocker(
         // UI থেকে পরিবর্তন করলে সাথে সাথে কাজ করে।
         // ──────────────────────────────────────────────────────────────
 
-        private const val COOLDOWN_MS  = 3_000L
-        private const val BUSY_TIMEOUT = 4_000L  // busy stuck হলে এর পরে force reset
+        private const val COOLDOWN_MS     = 3_000L
+        private const val BUSY_TIMEOUT    = 4_000L  // busy stuck হলে এর পরে force reset
+
+        // ≥77% → সরাসরি block (কোনো report dialog নেই)
+        // <77% → block + True/False report buttons দেখাও
+        const val REPORT_THRESHOLD = 0.77f
     }
 
     @Volatile private var busy          = false
@@ -132,14 +139,39 @@ class ScreenshotBlocker(
                 val c = classifier ?: return@launch
                 if (!c.isLoaded()) return@launch
 
-                // FIX: threshold প্রতিবার ThresholdManager থেকে পড়া হয় (আর hardcoded 0.22f নয়)
-                val threshold = ThresholdManager.getScreenshot(service.applicationContext)
+                // ── Image hash compute ────────────────────────────────────
+                val hash = ImageHashUtil.computeHash(cropped)
+                val ctx  = service.applicationContext
+
+                // ① False positive DB check — user আগে এই image "ভুল" বলেছে
+                if (FalsePositiveDB.isFalsePositive(ctx, hash)) {
+                    Log.d(TAG, "Skip — false positive DB match (hash=$hash)")
+                    return@launch
+                }
+
+                // ② Classify
+                val threshold = ThresholdManager.getScreenshot(ctx)
                 val res = c.classifyWithThreshold(cropped, threshold)
+
                 if (res.isAdult) {
-                    Log.w(TAG, "Adult detected: unsafe=${res.unsafeScore} (threshold=$threshold)")
+                    val score = res.unsafeScore
+                    Log.w(TAG, "Adult detected: unsafe=${score} (threshold=$threshold, hash=$hash)")
                     lastBlock = System.currentTimeMillis()
+
+                    // ③ Report button দেখাবে কিনা সিদ্ধান্ত:
+                    //    • score ≥ 77%              → সরাসরি block, কোনো report নেই
+                    //    • confirmed true DB match  → user আগে confirm করেছে, report নেই
+                    //    • score < 77% + নতুন image → block + True/False report button
+                    val isConfirmed  = FalsePositiveDB.isConfirmedTrue(ctx, hash)
+                    val showReport   = score < REPORT_THRESHOLD && !isConfirmed
+
                     withContext(Dispatchers.Main) {
-                        onAdultDetected("ML: adult content শনাক্ত (${(res.unsafeScore * 100).toInt()}%)")
+                        onAdultDetected(
+                            "ML: adult content শনাক্ত (${(score * 100).toInt()}%)",
+                            hash,
+                            score,
+                            showReport
+                        )
                     }
                 }
             } catch (e: Exception) {

@@ -165,8 +165,8 @@ class BlockerAccessibilityService : AccessibilityService() {
         val blocker = ScreenshotBlocker(
             service         = this,
             scope           = serviceScope,
-            onAdultDetected = { reason ->
-                serviceScope.launch(Dispatchers.Main) { triggerBlock(reason) }
+            onAdultDetected = { reason, hash, score, showReport ->
+                serviceScope.launch(Dispatchers.Main) { triggerBlock(reason, hash, score, showReport) }
             }
         )
         blocker.start(c)
@@ -175,7 +175,12 @@ class BlockerAccessibilityService : AccessibilityService() {
 
     // ── Block trigger ─────────────────────────────────────────────────
 
-    private fun triggerBlock(reason: String) {
+    private fun triggerBlock(
+        reason:      String,
+        hash:        Long    = 0L,
+        score:       Float   = 1f,
+        showReport:  Boolean = false
+    ) {
         val now = System.currentTimeMillis()
         if (now - lastBlockTime < BLOCK_COOLDOWN) return
         lastBlockTime = now
@@ -185,7 +190,10 @@ class BlockerAccessibilityService : AccessibilityService() {
         try {
             startActivity(Intent(this, BlockScreenActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                putExtra("reason", reason)
+                putExtra("reason",      reason)
+                putExtra("image_hash",  hash)
+                putExtra("score",       score)
+                putExtra("show_report", showReport)
             })
         } catch (e: Exception) { Log.e(TAG, "launch BlockScreen failed", e) }
     }
