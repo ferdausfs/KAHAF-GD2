@@ -12,14 +12,7 @@ import kotlinx.coroutines.*
 
 /**
  * ⚠️ IMPORTANT: This class is in a SEPARATE file on purpose.
- *
- * TakeScreenshotCallback and ScreenshotResult are API 30+ inner types.
- * If they are referenced anywhere in BlockerAccessibilityService.kt (even inside
- * a version-guarded method), ART will fail to verify the entire class on API < 30
- * → instant VerifyError / NoClassDefFoundError crash.
- *
- * Solution: isolate ALL API 30+ references here, annotated @RequiresApi(30).
- * BlockerAccessibilityService only instantiates this class after checking the API level.
+ * See BlockerAccessibilityService for explanation.
  */
 @RequiresApi(Build.VERSION_CODES.R)
 class ScreenshotBlocker(
@@ -29,13 +22,20 @@ class ScreenshotBlocker(
 ) {
     companion object {
         private const val TAG = "BDB_Screenshot"
-        private const val INTERVAL_MS  = 500L
+        private const val INTERVAL_MS  = 300L    // প্রতি 300ms — আগে 500ms ছিল
+
+        // Screenshot mode-এ threshold আলাদা — পুরো screen এ content dilute হয়
+        // তাই manual test (0.40) এর চেয়ে কম রাখা হলো
+        private const val SCREENSHOT_THRESHOLD = 0.22f
+
         private const val COOLDOWN_MS  = 3_000L
+        private const val BUSY_TIMEOUT = 4_000L  // busy stuck হলে এর পরে force reset
     }
 
-    @Volatile private var busy        = false
-    @Volatile private var lastBlock   = 0L
-    private var job: Job?             = null
+    @Volatile private var busy          = false
+    @Volatile private var busyStartTime = 0L
+    @Volatile private var lastBlock     = 0L
+    private var job: Job?               = null
     private var classifier: ContentClassifier? = null
 
     fun start(c: ContentClassifier) {
@@ -46,27 +46,32 @@ class ScreenshotBlocker(
                 delay(INTERVAL_MS)
                 val now = System.currentTimeMillis()
                 if (now - lastBlock < COOLDOWN_MS) continue
+
+                // busy stuck হলে force reset (capture callback miss হলে)
+                if (busy && now - busyStartTime > BUSY_TIMEOUT) {
+                    Log.w(TAG, "busy timeout — force reset")
+                    busy = false
+                }
                 if (busy) continue
+
                 capture()
             }
         }
-        Log.d(TAG, "Screenshot loop started")
+        Log.d(TAG, "Screenshot loop started — threshold=$SCREENSHOT_THRESHOLD")
     }
 
-    fun updateClassifier(c: ContentClassifier) {
-        classifier = c
-    }
+    fun updateClassifier(c: ContentClassifier) { classifier = c }
 
-    fun stop() {
-        job?.cancel()
-        job = null
-    }
+    fun stop() { job?.cancel(); job = null }
 
     fun resetCooldown() { lastBlock = System.currentTimeMillis() }
+
+    // ── Capture ───────────────────────────────────────────────────────
 
     @SuppressLint("NewApi")
     private fun capture() {
         busy = true
+        busyStartTime = System.currentTimeMillis()
         try {
             service.takeScreenshot(
                 Display.DEFAULT_DISPLAY,
@@ -77,6 +82,8 @@ class ScreenshotBlocker(
                     }
                     override fun onFailure(errorCode: Int) {
                         busy = false
+                        if (errorCode != 2) // 2 = TAKE_SCREENSHOT_ERROR_SECURE_WINDOW (skip logging)
+                            Log.w(TAG, "takeScreenshot failed: code=$errorCode")
                     }
                 }
             )
@@ -86,37 +93,80 @@ class ScreenshotBlocker(
         }
     }
 
+    // ── Analyze ───────────────────────────────────────────────────────
+
     @SuppressLint("NewApi")
     private fun analyze(result: AccessibilityService.ScreenshotResult) {
         scope.launch {
-            var bmp: Bitmap? = null
+            var full: Bitmap?    = null
+            var cropped: Bitmap? = null
             try {
-                // FIX: hardwareBuffer can be null on some devices/ROMs — guard with ?.
-                val hb = result.hardwareBuffer ?: run {
-                    busy = false
+                val hb = result.hardwareBuffer ?: run { busy = false; return@launch }
+
+                full = Bitmap.wrapHardwareBuffer(hb, result.colorSpace)
+                    ?.copy(Bitmap.Config.ARGB_8888, false)
+                    ?: run { busy = false; return@launch }
+
+                // ── Crop: status bar (top 7%) + nav bar (bottom 9%) বাদ দাও ──
+                // Full screen screenshot-এ UI chrome content কে dilute করে।
+                // Content area crop করলে model আরো accurate হয়।
+                val w = full.width
+                val h = full.height
+                val topCut    = (h * 0.07f).toInt()
+                val bottomCut = (h * 0.09f).toInt()
+                val cropH = h - topCut - bottomCut
+
+                cropped = if (cropH > 100) {
+                    Bitmap.createBitmap(full, 0, topCut, w, cropH)
+                } else full
+
+                // ── Black screen check: FLAG_SECURE বা SurfaceView video ──
+                // যদি screen mostly কালো হয়, skip করো (classify করে লাভ নেই)
+                if (isMostlyBlack(cropped)) {
                     return@launch
                 }
-                bmp = Bitmap.wrapHardwareBuffer(hb, result.colorSpace)
-                    ?.copy(Bitmap.Config.ARGB_8888, false)
 
-                val c = classifier
-                if (bmp != null && c != null && c.isLoaded()) {
-                    val res = c.classify(bmp)
-                    if (res.isAdult) {
-                        Log.w(TAG, "Adult content detected")
-                        lastBlock = System.currentTimeMillis()
-                        withContext(Dispatchers.Main) {
-                            onAdultDetected("ML: adult content শনাক্ত হয়েছে")
-                        }
+                val c = classifier ?: return@launch
+                if (!c.isLoaded()) return@launch
+
+                val res = c.classifyWithThreshold(cropped, SCREENSHOT_THRESHOLD)
+                if (res.isAdult) {
+                    Log.w(TAG, "Adult detected: unsafe=${res.unsafeScore}")
+                    lastBlock = System.currentTimeMillis()
+                    withContext(Dispatchers.Main) {
+                        onAdultDetected("ML: adult content শনাক্ত (${(res.unsafeScore * 100).toInt()}%)")
                     }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "analyze error", e)
             } finally {
                 try { result.hardwareBuffer?.close() } catch (_: Exception) {}
-                try { bmp?.recycle() }               catch (_: Exception) {}
+                if (cropped !== full) cropped?.recycle()
+                full?.recycle()
                 busy = false
             }
         }
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────
+
+    /**
+     * Screen mostly black = FLAG_SECURE app বা video SurfaceView।
+     * 224x224 sample-এ যদি avg brightness < 15 হয় তাহলে skip।
+     */
+    private fun isMostlyBlack(bmp: Bitmap): Boolean {
+        val sample = Bitmap.createScaledBitmap(bmp, 32, 32, false)
+        var totalBrightness = 0L
+        val pixels = IntArray(32 * 32)
+        sample.getPixels(pixels, 0, 32, 0, 0, 32, 32)
+        sample.recycle()
+        for (p in pixels) {
+            val r = (p shr 16) and 0xFF
+            val g = (p shr 8)  and 0xFF
+            val b =  p         and 0xFF
+            totalBrightness += (r + g + b)
+        }
+        val avg = totalBrightness / (pixels.size * 3)
+        return avg < 15  // avg brightness < 15/255 = mostly black
     }
 }

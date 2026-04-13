@@ -38,6 +38,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnAccess       : Button
     private lateinit var tvModelStatus   : TextView
     private lateinit var tvModelInfo     : TextView
+    private lateinit var tvMlScanStatus  : TextView
     private lateinit var btnUploadModel  : Button
     private lateinit var ivTestImage     : ImageView
     private lateinit var btnPickImage    : Button
@@ -174,6 +175,9 @@ class MainActivity : AppCompatActivity() {
             addView(gap(4))
             tvModelInfo = tv("", size = 12f, color = "#AAAAAA")
             addView(tvModelInfo)
+            addView(gap(8))
+            tvMlScanStatus = tv("", size = 12f, color = "#AAAAAA")
+            addView(tvMlScanStatus)
             addView(gap(12))
             btnUploadModel = btn("📂  Model Upload করুন (.tflite)", "#1565C0") { pickModelFile() }
             addView(btnUploadModel)
@@ -388,6 +392,15 @@ class MainActivity : AppCompatActivity() {
             tvModelStatus.setTextColor(Color.parseColor("#FF9800"))
             tvModelInfo.text = ".tflite ফাইল বেছে নিন"
             btnUploadModel.text = "📂 Model Upload করুন (.tflite)"
+        }
+
+        // ML Auto-Scanner status
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            tvMlScanStatus.text = "📸 Auto ML Scan: চালু (প্রতি 300ms, threshold 22%)"
+            tvMlScanStatus.setTextColor(Color.parseColor("#4CAF50"))
+        } else {
+            tvMlScanStatus.text = "⚠️ Auto ML Scan: Android 11+ লাগবে (আপনার Android ${Build.VERSION.RELEASE})"
+            tvMlScanStatus.setTextColor(Color.parseColor("#FF9800"))
         }
 
         tvOverallStatus.text = if (adminOk && accessOk && modelOk) "🛡️ সম্পূর্ণ সুরক্ষিত" else "⚠️ সেটআপ অসম্পূর্ণ"

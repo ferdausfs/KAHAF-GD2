@@ -137,6 +137,22 @@ class ContentClassifier(private val context: Context) {
         }
     }
 
+    /**
+     * Custom threshold দিয়ে classify।
+     * ScreenshotBlocker screenshot mode-এ আলাদা (কম) threshold ব্যবহার করে।
+     */
+    fun classifyWithThreshold(bitmap: Bitmap, threshold: Float): Result {
+        val base = classify(bitmap)
+        val adult = base.unsafeScore >= threshold
+        return base.copy(
+            isAdult = adult,
+            label = if (adult)
+                "🚫 Adult Content — ${(base.unsafeScore * 100).toInt()}% নিশ্চিত"
+            else
+                "✅ নিরাপদ — ${(base.safeScore * 100).toInt()}% নিশ্চিত"
+        )
+    }
+
     fun isLoaded(): Boolean = interpreter != null
 
     fun close() {
