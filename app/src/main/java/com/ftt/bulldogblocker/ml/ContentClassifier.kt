@@ -31,7 +31,10 @@ class ContentClassifier(private val context: Context) {
     companion object {
         const val MODEL_FILENAME   = "saved_model.tflite"
         private const val INPUT_SIZE      = 224
-        private const val ADULT_THRESHOLD = 0.60f
+        // FIX: Threshold 0.60 → 0.40 — semi-nude content also needs to be blocked.
+        // At 0.60, borderline content (bikini, lingerie, partial nudity) passes through.
+        // At 0.40, the model flags these earlier.
+        private const val ADULT_THRESHOLD = 0.40f
 
         fun modelFile(ctx: Context): File = File(ctx.filesDir, MODEL_FILENAME)
         fun isReady(ctx: Context): Boolean =
@@ -107,8 +110,9 @@ class ContentClassifier(private val context: Context) {
                 }
                 5 -> {
                     // GantMan inception_v3: [drawings, hentai, neutral, porn, sexy]
+                    // FIX: sexy class weighted 1.5x — semi-nude/lingerie এর জন্য
                     safe   = scores[2]           // neutral
-                    unsafe = scores[1] + scores[3] + scores[4]  // hentai + porn + sexy
+                    unsafe = scores[1] + scores[3] + (scores[4] * 1.5f)  // hentai + porn + sexy*1.5
                 }
                 else -> {
                     // Unknown model — treat last output as unsafe score

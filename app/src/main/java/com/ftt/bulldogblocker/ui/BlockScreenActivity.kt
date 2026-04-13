@@ -3,14 +3,16 @@ package com.ftt.bulldogblocker.ui
 import android.graphics.Color
 import android.os.Bundle
 import android.view.Gravity
-import android.widget.Button
+import android.view.KeyEvent
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
 
 /**
  * Full-screen block overlay.
- * MUST extend AppCompatActivity — MaterialComponents theme requires it.
+ * FIX: Back button এবং recent apps দিয়ে dismiss করা যাবে না।
+ * User কে HOME বাটন দিয়ে যেতে হবে — এবং service আবার block করবে যদি ফিরে আসে।
  */
 class BlockScreenActivity : AppCompatActivity() {
 
@@ -18,6 +20,13 @@ class BlockScreenActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
 
         val reason = intent.getStringExtra("reason") ?: "🚫 কন্টেন্ট ব্লক করা হয়েছে"
+
+        // FIX: Block back press entirely — user cannot dismiss block screen with back
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                // Silently consume — do nothing
+            }
+        })
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -30,7 +39,7 @@ class BlockScreenActivity : AppCompatActivity() {
             )
         }
 
-        val tvIcon = TextView(this).apply {
+        root.addView(TextView(this).apply {
             text     = "🐶"
             textSize = 72f
             gravity  = Gravity.CENTER
@@ -38,9 +47,9 @@ class BlockScreenActivity : AppCompatActivity() {
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
-        }
+        })
 
-        val tvTitle = TextView(this).apply {
+        root.addView(TextView(this).apply {
             text      = "ব্লক করা হয়েছে"
             textSize  = 28f
             setTextColor(Color.WHITE)
@@ -50,9 +59,9 @@ class BlockScreenActivity : AppCompatActivity() {
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
-        }
+        })
 
-        val tvReason = TextView(this).apply {
+        root.addView(TextView(this).apply {
             this.text = reason
             textSize  = 16f
             setTextColor(Color.parseColor("#FFCDD2"))
@@ -62,24 +71,29 @@ class BlockScreenActivity : AppCompatActivity() {
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
-        }
+        })
 
-        val btnBack = Button(this).apply {
-            text = "← ফিরে যান"
-            setBackgroundColor(Color.parseColor("#7F0000"))
-            setTextColor(Color.WHITE)
+        // FIX: "ফিরে যান" button সরিয়ে দেওয়া হয়েছে।
+        // User শুধু Home button দিয়ে যেতে পারবে।
+        root.addView(TextView(this).apply {
+            text     = "Home বাটন চাপুন"
+            textSize = 14f
+            setTextColor(Color.parseColor("#EF9A9A"))
+            gravity  = Gravity.CENTER
             layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { gravity = Gravity.CENTER_HORIZONTAL }
-            setOnClickListener { finish() }
-        }
-
-        root.addView(tvIcon)
-        root.addView(tvTitle)
-        root.addView(tvReason)
-        root.addView(btnBack)
+            )
+        })
 
         setContentView(root)
+    }
+
+    // FIX: Hardware back key ও block করা হচ্ছে (volume/power key ছাড়া সব)
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        return when (keyCode) {
+            KeyEvent.KEYCODE_BACK -> true  // block
+            else -> super.onKeyDown(keyCode, event)
+        }
     }
 }
