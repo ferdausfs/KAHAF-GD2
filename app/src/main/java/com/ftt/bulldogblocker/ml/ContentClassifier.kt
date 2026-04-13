@@ -18,7 +18,9 @@ import java.nio.channels.FileChannel
  * User uploads saved_model.tflite via the app UI.
  * Saved to: context.filesDir/saved_model.tflite
  *
- * Expected output shape: [1][2] → [safe_score, unsafe_score]
+ * Supported output shapes:
+ *   [1][2] → [safe_score, unsafe_score]         (2-class mobilenet_v2)
+ *   [1][5] → [drawings, hentai, neutral, porn, sexy]  (5-class inception_v3)
  */
 class ContentClassifier(private val context: Context) {
 
@@ -31,12 +33,7 @@ class ContentClassifier(private val context: Context) {
 
     companion object {
         const val MODEL_FILENAME   = "saved_model.tflite"
-        private const val INPUT_SIZE      = 224
-        // ── BUG FIX: ADULT_THRESHOLD আর hardcode নেই ──────────────────
-        // আগে: private const val ADULT_THRESHOLD = 0.40f
-        // এখন: classify() প্রতিবার ThresholdManager.getManual(context) পড়ে।
-        // UI থেকে পরিবর্তন করলে সাথে সাথে কাজ করে।
-        // ──────────────────────────────────────────────────────────────
+        private const val INPUT_SIZE = 224
 
         fun modelFile(ctx: Context): File = File(ctx.filesDir, MODEL_FILENAME)
         fun isReady(ctx: Context): Boolean =
@@ -59,8 +56,6 @@ class ContentClassifier(private val context: Context) {
                 numThreads = 2
                 setUseXNNPACK(true)
             }
-            // BUG FIX: interpreter assignment was outside synchronized block —
-            // concurrent close() call could race with this write → data race
             synchronized(this) {
                 interpreter = Interpreter(buf, options)
             }
@@ -74,30 +69,29 @@ class ContentClassifier(private val context: Context) {
     /**
      * Classify a bitmap using the user-set manual threshold.
      * Call load() first. This is a blocking call — run on a background thread.
-     *
-     * FIX: threshold এখন ThresholdManager.getManual() থেকে পড়া হয় —
-     * hardcoded 0.40f এর বদলে user-set value ব্যবহার হয়।
-     *
-     * FIX: synchronized on interpreter reference to prevent concurrent access crash
-     * when classifier is reloaded (via broadcast) while classify() is running.
      */
     fun classify(bitmap: Bitmap): Result {
-        // Dynamic threshold — প্রতিবার ThresholdManager থেকে পড়া হয়
-        val threshold = ThresholdManager.getManual(context)
-        return classifyWithThreshold(bitmap, threshold)
+        val threshold      = ThresholdManager.getManual(context)
+        val sexyAlone      = ThresholdManager.getSexyAlone(context)
+        return classifyWithThreshold(bitmap, threshold, sexyAlone)
     }
 
     /**
      * Custom threshold দিয়ে classify।
      * ScreenshotBlocker screenshot mode-এ ThresholdManager.getScreenshot() দিয়ে ডাকে।
+     *
+     * @param threshold     combined unsafe score threshold
+     * @param sexyAloneThreshold  sexy class standalone threshold (semi-nude/lingerie)
+     *                            0f পাস করলে standalone check বন্ধ থাকে।
      */
-    fun classifyWithThreshold(bitmap: Bitmap, threshold: Float): Result {
+    fun classifyWithThreshold(
+        bitmap: Bitmap,
+        threshold: Float,
+        sexyAloneThreshold: Float = ThresholdManager.DEFAULT_SEXY_ALONE
+    ): Result {
         return try {
-            val input  = bitmapToBuffer(bitmap)
+            val input = bitmapToBuffer(bitmap)
 
-            // BUG FIX: was two separate synchronized blocks with outputTensor.shape()[1]
-            // called OUTSIDE — interpreter could be closed between the two blocks,
-            // making outputTensor stale. Now: get shape and run inside one synchronized block.
             val outputSize: Int
             val output: Array<FloatArray>
             val ran = synchronized(this) {
@@ -112,45 +106,84 @@ class ContentClassifier(private val context: Context) {
 
             val scores = output[0]
 
-            // Determine unsafe score based on output size
             val unsafe: Float
             val safe: Float
+            var sexyScore = 0f   // 5-class মডেলে sexy score আলাদা রাখা হয়
+
             when (outputSize) {
                 2 -> {
-                    // GantMan mobilenet_v2: [safe, unsafe]
+                    // 2-class mobilenet_v2: [safe, unsafe]
                     safe   = scores[0]
                     unsafe = scores[1]
                 }
                 5 -> {
-                    // GantMan inception_v3: [drawings, hentai, neutral, porn, sexy]
-                    // FIX: sexy class weighted 1.5x — semi-nude/lingerie এর জন্য
-                    safe   = scores[2]           // neutral
-                    unsafe = scores[1] + scores[3] + (scores[4] * 1.5f)  // hentai + porn + sexy*1.5
+                    // 5-class inception_v3: [drawings(0), hentai(1), neutral(2), porn(3), sexy(4)]
+                    safe      = scores[2]           // neutral
+                    sexyScore = scores[4]
+
+                    // ── v6 FIX: স্মার্ট sexy contribution ──────────────────────
+                    // সমস্যা: আগে sexy*1.5 সবসময় যোগ হতো।
+                    // ফলে exercise/sports ছবিতেও sexy=0.20 থাকলে 0.30 যোগ হতো → false positive।
+                    //
+                    // নতুন নিয়ম:
+                    //   sexy > 0.35 হলে → পুরো weight (1.5x) — clearly semi-nude
+                    //   sexy 0.20-0.35  → কম weight (0.6x) — uncertain, বেশি contribute না করুক
+                    //   sexy < 0.20     → নগণ্য (0.1x)    — background noise
+                    val sexyContrib = when {
+                        sexyScore > 0.35f -> sexyScore * 1.5f
+                        sexyScore > 0.20f -> sexyScore * 0.6f
+                        else              -> sexyScore * 0.1f
+                    }
+                    unsafe = scores[1] + scores[3] + sexyContrib  // hentai + porn + sexyContrib
+                    // ────────────────────────────────────────────────────────────
                 }
                 else -> {
-                    // Unknown model — treat last output as unsafe score
+                    // Unknown model — treat last output as unsafe
                     safe   = scores[0]
                     unsafe = scores.last()
                 }
             }
 
-            val adult = unsafe >= threshold
+            // ── Primary check: combined unsafe score ──────────────────────────
+            var adult = unsafe >= threshold
+
+            // ── v6 NEW: Semi-nude standalone check ───────────────────────────
+            // 5-class model-এ sexy score একাই sexyAloneThreshold পার করলে block।
+            // bra, panty, lingerie, one-piece — এগুলো sexy class-এ পড়ে।
+            // combined score threshold পার না করলেও এখানে ধরা পড়বে।
+            // sexyAloneThreshold = 0f হলে এই check বন্ধ (2-class model)।
+            val blockedBySexy = outputSize == 5
+                    && sexyAloneThreshold > 0f
+                    && sexyScore >= sexyAloneThreshold
+            // ─────────────────────────────────────────────────────────────────
+
+            val finalAdult = adult || blockedBySexy
+
+            val label = when {
+                blockedBySexy && !adult ->
+                    "🚫 Semi-nude — ${(sexyScore * 100).toInt()}% sexy (standalone block)"
+                finalAdult ->
+                    "🚫 Adult Content — ${(unsafe * 100).toInt()}% নিশ্চিত"
+                else ->
+                    "✅ নিরাপদ — ${(safe * 100).toInt()}% নিশ্চিত"
+            }
+
+            // unsafeScore হিসেবে সর্বোচ্চ value দাও (report-এ কাজে লাগে)
+            val reportScore = if (blockedBySexy && sexyScore > unsafe) sexyScore else unsafe
+
             Result(
                 safeScore   = safe,
-                unsafeScore = unsafe,
-                isAdult     = adult,
-                label = if (adult)
-                    "🚫 Adult Content — ${(unsafe * 100).toInt()}% নিশ্চিত"
-                else
-                    "✅ নিরাপদ — ${(safe * 100).toInt()}% নিশ্চিত"
+                unsafeScore = reportScore,
+                isAdult     = finalAdult,
+                label       = label
             )
+
         } catch (e: Exception) {
             e.printStackTrace()
             Result(1f, 0f, false, "বিশ্লেষণ ব্যর্থ: ${e.message}")
         }
     }
 
-    // BUG FIX: was `interpreter != null` without synchronized — data race with close()
     fun isLoaded(): Boolean = synchronized(this) { interpreter != null }
 
     fun close() {
@@ -184,9 +217,6 @@ class ContentClassifier(private val context: Context) {
     }
 
     private fun loadMapped(f: File): MappedByteBuffer {
-        // FIX: FileInputStream must be closed explicitly.
-        // Previously `fis.channel.use { }` closed the channel but not the FileInputStream.
-        // Now we use `fis.use { }` which closes both the stream AND the channel.
         FileInputStream(f).use { fis ->
             return fis.channel.map(FileChannel.MapMode.READ_ONLY, 0, fis.channel.size())
         }

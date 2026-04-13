@@ -147,8 +147,9 @@ class ScreenshotBlocker(
                     return@launch
                 }
 
-                val threshold = ThresholdManager.getScreenshot(ctx)
-                val res = c.classifyWithThreshold(cropped, threshold)
+                val threshold     = ThresholdManager.getScreenshot(ctx)
+                val sexyAlone     = ThresholdManager.getSexyAlone(ctx)
+                val res = c.classifyWithThreshold(cropped, threshold, sexyAlone)
 
                 if (res.isAdult) {
                     val score = res.unsafeScore
