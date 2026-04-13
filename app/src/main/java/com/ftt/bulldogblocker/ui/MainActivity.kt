@@ -16,22 +16,20 @@ import android.view.View
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import com.ftt.bulldogblocker.AppListManager
+import com.ftt.bulldogblocker.ThresholdManager
 import com.ftt.bulldogblocker.admin.DeviceAdminReceiver
 import com.ftt.bulldogblocker.ml.ContentClassifier
 import com.ftt.bulldogblocker.service.BlockerAccessibilityService
 import com.ftt.bulldogblocker.service.BlockerForegroundService
-import android.media.projection.MediaProjectionManager
-import com.ftt.bulldogblocker.service.MediaProjectionCaptureService
 import kotlinx.coroutines.*
 import java.io.FileOutputStream
 
 class MainActivity : AppCompatActivity() {
 
     companion object {
-        private const val REQ_ADMIN        = 101
-        private const val REQ_MODEL_PICK   = 102
-        private const val REQ_IMAGE_PICK   = 103
-        private const val REQ_MEDIA_PROJ   = 104
+        private const val REQ_ADMIN      = 101
+        private const val REQ_MODEL_PICK = 102
+        private const val REQ_IMAGE_PICK = 103
     }
 
     private lateinit var tvOverallStatus : TextView
@@ -42,8 +40,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvModelStatus   : TextView
     private lateinit var tvModelInfo     : TextView
     private lateinit var tvMlScanStatus  : TextView
-    private lateinit var tvVideoScanStatus : TextView
-    private lateinit var btnVideoScan    : Button
     private lateinit var btnUploadModel  : Button
     private lateinit var ivTestImage     : ImageView
     private lateinit var btnPickImage    : Button
@@ -171,22 +167,6 @@ class MainActivity : AppCompatActivity() {
 
         root.addView(gap(24))
 
-        // ── Video Scan (MediaProjection) ─────────────────────────────
-        root.addView(sectionLabel("🎥 VIDEO SCAN (Optional)"))
-        root.addView(card().apply {
-            addView(tv("Video content-ও ML দিয়ে block করুন", size = 15f, color = "#FFFFFF"))
-            addView(gap(4))
-            addView(tv("চালু করলে একবার system permission dialog আসবে", size = 12f, color = "#AAAAAA"))
-            addView(gap(10))
-            tvVideoScanStatus = tv("", size = 13f)
-            addView(tvVideoScanStatus)
-            addView(gap(10))
-            btnVideoScan = btn("🎥 Video Scan চালু করুন", "#4A148C") { toggleVideoScan() }
-            addView(btnVideoScan)
-        })
-
-        root.addView(gap(24))
-
         // ── Model Upload ─────────────────────────────────────────────
         root.addView(sectionLabel("🤖 TFLITE MODEL"))
 
@@ -252,6 +232,84 @@ class MainActivity : AppCompatActivity() {
                 setBackgroundColor(Color.parseColor("#1A1A1A"))
             }
             addView(tvTestResult)
+        })
+
+        root.addView(gap(24))
+
+        // ── Threshold Settings ───────────────────────────────────────
+        root.addView(sectionLabel("⚙️ THRESHOLD SETTINGS"))
+
+        root.addView(card().apply {
+            addView(tv(
+                "কম threshold = বেশি কঠোর (বেশি false positive হতে পারে)\nবেশি threshold = কম কঠোর (কিছু content মিস হতে পারে)",
+                size = 11f, color = "#888888"
+            ))
+            addView(gap(16))
+
+            // ── Manual Test Threshold ──────────────────────────────
+            val manualPct = (ThresholdManager.getManual(this@MainActivity) * 100).toInt()
+            val tvManualLabel = tv("🧪 Manual Test Threshold: ${manualPct}%", size = 14f, color = "#FFFFFF")
+            addView(tvManualLabel)
+            addView(gap(8))
+
+            val sbManual = android.widget.SeekBar(this@MainActivity).apply {
+                max      = 80          // 0–80 → 10%–90%
+                progress = manualPct - 10
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+                setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(sb: android.widget.SeekBar?, p: Int, fromUser: Boolean) {
+                        val pct = p + 10
+                        tvManualLabel.text = "🧪 Manual Test Threshold: ${pct}%"
+                    }
+                    override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {}
+                    override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {
+                        val pct = (sb?.progress ?: 30) + 10
+                        ThresholdManager.setManual(this@MainActivity, pct / 100f)
+                        Toast.makeText(this@MainActivity, "✅ Manual threshold: ${pct}%", Toast.LENGTH_SHORT).show()
+                    }
+                })
+            }
+            addView(sbManual)
+            addView(tv("← বেশি কঠোর (10%)    কম কঠোর (90%) →", size = 10f, color = "#666666"))
+            addView(gap(20))
+
+            // ── Screenshot Auto-scan Threshold ────────────────────
+            val screenshotPct = (ThresholdManager.getScreenshot(this@MainActivity) * 100).toInt()
+            val tvSsLabel = tv("📸 Auto-Scan Threshold: ${screenshotPct}%", size = 14f, color = "#FFFFFF")
+            addView(tvSsLabel)
+            addView(gap(4))
+            addView(tv(
+                "কম রাখলে ভালো — screenshot-এ content dilute হয়",
+                size = 11f, color = "#888888"
+            ))
+            addView(gap(8))
+
+            val sbScreenshot = android.widget.SeekBar(this@MainActivity).apply {
+                max      = 55          // 0–55 → 5%–60%
+                progress = screenshotPct - 5
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+                setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(sb: android.widget.SeekBar?, p: Int, fromUser: Boolean) {
+                        val pct = p + 5
+                        tvSsLabel.text = "📸 Auto-Scan Threshold: ${pct}%"
+                    }
+                    override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {}
+                    override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {
+                        val pct = (sb?.progress ?: 17) + 5
+                        ThresholdManager.setScreenshot(this@MainActivity, pct / 100f)
+                        refreshStatus()
+                        Toast.makeText(this@MainActivity, "✅ Auto-scan threshold: ${pct}%", Toast.LENGTH_SHORT).show()
+                    }
+                })
+            }
+            addView(sbScreenshot)
+            addView(tv("← বেশি কঠোর (5%)    কম কঠোর (60%) →", size = 10f, color = "#666666"))
         })
 
         root.addView(gap(48))
@@ -348,15 +406,16 @@ class MainActivity : AppCompatActivity() {
                     selected[which] = isChecked
                 }
                 .setPositiveButton("সংরক্ষণ") { _, _ ->
-                    apps.forEachIndexed { i, app ->
-                        if (selected[i]) {
-                            if (isBlacklist) AppListManager.addBlacklist(this@MainActivity, app.pkg)
-                            else             AppListManager.addWhitelist(this@MainActivity, app.pkg)
-                        } else {
-                            if (isBlacklist) AppListManager.removeBlacklist(this@MainActivity, app.pkg)
-                            else             AppListManager.removeWhitelist(this@MainActivity, app.pkg)
-                        }
-                    }
+                    // BUG FIX: আগে সব installed app-এর জন্য আলাদা add/remove ডাকা হতো
+                    // (50 apps → 50-100 broadcast)। এখন: একটাই batch update + একটাই broadcast।
+                    val newSelected = apps
+                        .filterIndexed { i, _ -> selected[i] }
+                        .map { it.pkg }
+                        .toSet()
+
+                    if (isBlacklist) AppListManager.setBlacklist(this@MainActivity, newSelected)
+                    else             AppListManager.setWhitelist(this@MainActivity, newSelected)
+
                     refreshAppLists()
                     Toast.makeText(this@MainActivity, "✅ সংরক্ষিত হয়েছে", Toast.LENGTH_SHORT).show()
                 }
@@ -417,20 +476,14 @@ class MainActivity : AppCompatActivity() {
 
         // ML Auto-Scanner status
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            tvMlScanStatus.text = "📸 Auto ML Scan: চালু (প্রতি 300ms, threshold 22%)"
+            // BUG FIX: hardcoded "22%" এর বদলে ThresholdManager থেকে পড়া হচ্ছে
+            val ssThresholdPct = (ThresholdManager.getScreenshot(this) * 100).toInt()
+            tvMlScanStatus.text = "📸 Auto ML Scan: চালু (প্রতি 300ms, threshold ${ssThresholdPct}%)"
             tvMlScanStatus.setTextColor(Color.parseColor("#4CAF50"))
         } else {
             tvMlScanStatus.text = "⚠️ Auto ML Scan: Android 11+ লাগবে (আপনার Android ${Build.VERSION.RELEASE})"
             tvMlScanStatus.setTextColor(Color.parseColor("#FF9800"))
         }
-
-        // Video scan status
-        val videoOn = MediaProjectionCaptureService.isEnabled(this)
-        tvVideoScanStatus.text = if (videoOn) "✅ চালু — video frame ML দিয়ে scan হচ্ছে"
-                                 else          "⭕ বন্ধ — video content scan হচ্ছে না"
-        tvVideoScanStatus.setTextColor(Color.parseColor(if (videoOn) "#4CAF50" else "#888888"))
-        btnVideoScan.text = if (videoOn) "⏹ Video Scan বন্ধ করুন" else "🎥 Video Scan চালু করুন"
-        btnVideoScan.setBackgroundColor(Color.parseColor(if (videoOn) "#B71C1C" else "#4A148C"))
 
         tvOverallStatus.text = if (adminOk && accessOk && modelOk) "🛡️ সম্পূর্ণ সুরক্ষিত" else "⚠️ সেটআপ অসম্পূর্ণ"
         tvOverallStatus.setTextColor(Color.parseColor(if (adminOk && accessOk && modelOk) "#4CAF50" else "#FF9800"))
@@ -534,20 +587,6 @@ class MainActivity : AppCompatActivity() {
     // PERMISSIONS
     // ════════════════════════════════════════════════════════════════
 
-    private fun toggleVideoScan() {
-        val isOn = MediaProjectionCaptureService.isEnabled(this)
-        if (isOn) {
-            // বন্ধ করো
-            MediaProjectionCaptureService.setEnabled(this, false)
-            MediaProjectionCaptureService.stop(this)
-            refreshStatus()
-        } else {
-            // চালু করো — permission dialog
-            val mgr = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-            startActivityForResult(mgr.createScreenCaptureIntent(), REQ_MEDIA_PROJ)
-        }
-    }
-
     private fun requestDeviceAdmin() {
         val intent = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
             putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, DeviceAdminReceiver.getComponentName(this@MainActivity))
@@ -573,20 +612,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-
-        // MediaProjection: data একটা Intent (Uri নয়)
-        if (requestCode == REQ_MEDIA_PROJ) {
-            if (resultCode == Activity.RESULT_OK && data != null) {
-                MediaProjectionCaptureService.setEnabled(this, true)
-                MediaProjectionCaptureService.start(this, resultCode, data)
-                refreshStatus()
-                Toast.makeText(this, "🎥 Video Scan চালু হয়েছে", Toast.LENGTH_SHORT).show()
-            } else {
-                Toast.makeText(this, "Permission দেওয়া হয়নি", Toast.LENGTH_SHORT).show()
-            }
-            return
-        }
-
         if (resultCode != Activity.RESULT_OK) return
         val uri = data?.data ?: return
         when (requestCode) {
@@ -599,12 +624,7 @@ class MainActivity : AppCompatActivity() {
                 tvTestResult.setTextColor(Color.parseColor("#AAAAAA"))
                 tvTestResult.setBackgroundColor(Color.parseColor("#1A1A1A"))
             }
-            REQ_MEDIA_PROJ -> {
-                MediaProjectionCaptureService.setEnabled(this, true)
-                MediaProjectionCaptureService.start(this, resultCode, uri ?: return)
-                refreshStatus()
-                Toast.makeText(this, "🎥 Video Scan চালু হয়েছে", Toast.LENGTH_SHORT).show()
-            }
+            REQ_ADMIN -> refreshStatus()
         }
     }
 

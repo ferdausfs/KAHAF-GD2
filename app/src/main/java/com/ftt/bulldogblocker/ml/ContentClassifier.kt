@@ -2,6 +2,7 @@ package com.ftt.bulldogblocker.ml
 
 import android.content.Context
 import android.graphics.Bitmap
+import com.ftt.bulldogblocker.ThresholdManager
 import org.tensorflow.lite.Interpreter
 import java.io.File
 import java.io.FileInputStream
@@ -31,10 +32,11 @@ class ContentClassifier(private val context: Context) {
     companion object {
         const val MODEL_FILENAME   = "saved_model.tflite"
         private const val INPUT_SIZE      = 224
-        // FIX: Threshold 0.60 → 0.40 — semi-nude content also needs to be blocked.
-        // At 0.60, borderline content (bikini, lingerie, partial nudity) passes through.
-        // At 0.40, the model flags these earlier.
-        private const val ADULT_THRESHOLD = 0.40f
+        // ── BUG FIX: ADULT_THRESHOLD আর hardcode নেই ──────────────────
+        // আগে: private const val ADULT_THRESHOLD = 0.40f
+        // এখন: classify() প্রতিবার ThresholdManager.getManual(context) পড়ে।
+        // UI থেকে পরিবর্তন করলে সাথে সাথে কাজ করে।
+        // ──────────────────────────────────────────────────────────────
 
         fun modelFile(ctx: Context): File = File(ctx.filesDir, MODEL_FILENAME)
         fun isReady(ctx: Context): Boolean =
@@ -69,13 +71,26 @@ class ContentClassifier(private val context: Context) {
     }
 
     /**
-     * Classify a bitmap.
+     * Classify a bitmap using the user-set manual threshold.
      * Call load() first. This is a blocking call — run on a background thread.
+     *
+     * FIX: threshold এখন ThresholdManager.getManual() থেকে পড়া হয় —
+     * hardcoded 0.40f এর বদলে user-set value ব্যবহার হয়।
      *
      * FIX: synchronized on interpreter reference to prevent concurrent access crash
      * when classifier is reloaded (via broadcast) while classify() is running.
      */
     fun classify(bitmap: Bitmap): Result {
+        // Dynamic threshold — প্রতিবার ThresholdManager থেকে পড়া হয়
+        val threshold = ThresholdManager.getManual(context)
+        return classifyWithThreshold(bitmap, threshold)
+    }
+
+    /**
+     * Custom threshold দিয়ে classify।
+     * ScreenshotBlocker screenshot mode-এ ThresholdManager.getScreenshot() দিয়ে ডাকে।
+     */
+    fun classifyWithThreshold(bitmap: Bitmap, threshold: Float): Result {
         return try {
             val input  = bitmapToBuffer(bitmap)
 
@@ -121,7 +136,7 @@ class ContentClassifier(private val context: Context) {
                 }
             }
 
-            val adult = unsafe >= ADULT_THRESHOLD
+            val adult = unsafe >= threshold
             Result(
                 safeScore   = safe,
                 unsafeScore = unsafe,
@@ -135,22 +150,6 @@ class ContentClassifier(private val context: Context) {
             e.printStackTrace()
             Result(1f, 0f, false, "বিশ্লেষণ ব্যর্থ: ${e.message}")
         }
-    }
-
-    /**
-     * Custom threshold দিয়ে classify।
-     * ScreenshotBlocker screenshot mode-এ আলাদা (কম) threshold ব্যবহার করে।
-     */
-    fun classifyWithThreshold(bitmap: Bitmap, threshold: Float): Result {
-        val base = classify(bitmap)
-        val adult = base.unsafeScore >= threshold
-        return base.copy(
-            isAdult = adult,
-            label = if (adult)
-                "🚫 Adult Content — ${(base.unsafeScore * 100).toInt()}% নিশ্চিত"
-            else
-                "✅ নিরাপদ — ${(base.safeScore * 100).toInt()}% নিশ্চিত"
-        )
     }
 
     fun isLoaded(): Boolean = interpreter != null

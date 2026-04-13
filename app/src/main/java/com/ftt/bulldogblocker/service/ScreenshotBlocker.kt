@@ -7,6 +7,7 @@ import android.os.Build
 import android.util.Log
 import android.view.Display
 import androidx.annotation.RequiresApi
+import com.ftt.bulldogblocker.ThresholdManager
 import com.ftt.bulldogblocker.ml.ContentClassifier
 import kotlinx.coroutines.*
 
@@ -24,9 +25,11 @@ class ScreenshotBlocker(
         private const val TAG = "BDB_Screenshot"
         private const val INTERVAL_MS  = 300L    // প্রতি 300ms — আগে 500ms ছিল
 
-        // Screenshot mode-এ threshold আলাদা — পুরো screen এ content dilute হয়
-        // তাই manual test (0.40) এর চেয়ে কম রাখা হলো
-        private const val SCREENSHOT_THRESHOLD = 0.22f
+        // ── BUG FIX: SCREENSHOT_THRESHOLD আর hardcode নেই ─────────────
+        // আগে: private const val SCREENSHOT_THRESHOLD = 0.22f
+        // এখন: analyze() প্রতিবার ThresholdManager.getScreenshot() পড়ে।
+        // UI থেকে পরিবর্তন করলে সাথে সাথে কাজ করে।
+        // ──────────────────────────────────────────────────────────────
 
         private const val COOLDOWN_MS  = 3_000L
         private const val BUSY_TIMEOUT = 4_000L  // busy stuck হলে এর পরে force reset
@@ -57,7 +60,7 @@ class ScreenshotBlocker(
                 capture()
             }
         }
-        Log.d(TAG, "Screenshot loop started — threshold=$SCREENSHOT_THRESHOLD")
+        Log.d(TAG, "Screenshot loop started — interval=${INTERVAL_MS}ms, threshold=dynamic(ThresholdManager)")
     }
 
     fun updateClassifier(c: ContentClassifier) { classifier = c }
@@ -129,9 +132,11 @@ class ScreenshotBlocker(
                 val c = classifier ?: return@launch
                 if (!c.isLoaded()) return@launch
 
-                val res = c.classifyWithThreshold(cropped, SCREENSHOT_THRESHOLD)
+                // FIX: threshold প্রতিবার ThresholdManager থেকে পড়া হয় (আর hardcoded 0.22f নয়)
+                val threshold = ThresholdManager.getScreenshot(service.applicationContext)
+                val res = c.classifyWithThreshold(cropped, threshold)
                 if (res.isAdult) {
-                    Log.w(TAG, "Adult detected: unsafe=${res.unsafeScore}")
+                    Log.w(TAG, "Adult detected: unsafe=${res.unsafeScore} (threshold=$threshold)")
                     lastBlock = System.currentTimeMillis()
                     withContext(Dispatchers.Main) {
                         onAdultDetected("ML: adult content শনাক্ত (${(res.unsafeScore * 100).toInt()}%)")

@@ -27,10 +27,15 @@ object AppListManager {
     // ── Write ─────────────────────────────────────────────────────────
 
     fun addBlacklist(ctx: Context, pkg: String) {
-        val s = getBlacklist(ctx).toMutableSet().also { it.add(pkg) }
-        prefs(ctx).edit().putStringSet(KEY_BLACK, s).apply()
-        // যদি whitelist-এ থাকে তাহলে সরাও
-        removeWhitelist(ctx, pkg)
+        // BUG FIX: আগে removeWhitelist() ডাকা হতো (যেটা নিজেই notifyChanged ডাকতো)
+        // তারপর আবার notifyChanged() ডাকা হতো → 2টা broadcast।
+        // এখন: একটাই edit() call-এ সব করা হয়, একটাই broadcast।
+        val black = getBlacklist(ctx).toMutableSet().also { it.add(pkg) }
+        val white = getWhitelist(ctx).toMutableSet().also { it.remove(pkg) }
+        prefs(ctx).edit()
+            .putStringSet(KEY_BLACK, black)
+            .putStringSet(KEY_WHITE, white)
+            .apply()
         notifyChanged(ctx)
     }
 
@@ -41,16 +46,42 @@ object AppListManager {
     }
 
     fun addWhitelist(ctx: Context, pkg: String) {
-        val s = getWhitelist(ctx).toMutableSet().also { it.add(pkg) }
-        prefs(ctx).edit().putStringSet(KEY_WHITE, s).apply()
-        // যদি blacklist-এ থাকে তাহলে সরাও
-        removeBlacklist(ctx, pkg)
+        // BUG FIX: একই double-broadcast issue — এখন atomic।
+        val white = getWhitelist(ctx).toMutableSet().also { it.add(pkg) }
+        val black = getBlacklist(ctx).toMutableSet().also { it.remove(pkg) }
+        prefs(ctx).edit()
+            .putStringSet(KEY_WHITE, white)
+            .putStringSet(KEY_BLACK, black)
+            .apply()
         notifyChanged(ctx)
     }
 
     fun removeWhitelist(ctx: Context, pkg: String) {
         val s = getWhitelist(ctx).toMutableSet().also { it.remove(pkg) }
         prefs(ctx).edit().putStringSet(KEY_WHITE, s).apply()
+        notifyChanged(ctx)
+    }
+
+    /**
+     * Batch update — dialog save-এর জন্য।
+     * BUG FIX: আগে showAppPicker সব installed app-এর জন্য আলাদা add/remove ডাকতো
+     * (50 apps = 50-100 broadcast)। এখন একটাই atomic update + একটাই broadcast।
+     */
+    fun setBlacklist(ctx: Context, newBlack: Set<String>) {
+        val white = getWhitelist(ctx).toMutableSet().apply { removeAll(newBlack) }
+        prefs(ctx).edit()
+            .putStringSet(KEY_BLACK, newBlack)
+            .putStringSet(KEY_WHITE, white)
+            .apply()
+        notifyChanged(ctx)
+    }
+
+    fun setWhitelist(ctx: Context, newWhite: Set<String>) {
+        val black = getBlacklist(ctx).toMutableSet().apply { removeAll(newWhite) }
+        prefs(ctx).edit()
+            .putStringSet(KEY_WHITE, newWhite)
+            .putStringSet(KEY_BLACK, black)
+            .apply()
         notifyChanged(ctx)
     }
 
