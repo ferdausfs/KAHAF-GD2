@@ -75,13 +75,18 @@ class ContentClassifier(private val context: Context) {
     fun classify(bitmap: Bitmap): Result {
         return try {
             val input  = bitmapToBuffer(bitmap)
-            val output = Array(1) { FloatArray(2) }
 
-            // FIX: Read AND use interpreter entirely inside synchronized block.
-            // Previous code captured 'interp' OUTSIDE the lock — by the time run()
-            // was called inside the lock, the captured reference could be a closed
-            // Interpreter (close() sets interpreter=null but doesn't invalidate
-            // already-captured local references). This caused undefined behavior.
+            // FIX: Detect output shape dynamically — don't assume [1][2].
+            // GantMan mobilenet_v2_140_224 → [1,2]: [safe, unsafe]
+            // GantMan inception_v3         → [1,5]: [drawings, hentai, neutral, porn, sexy]
+            // Code now handles both automatically.
+            val outputTensor = synchronized(this) {
+                interpreter?.getOutputTensor(0)
+            } ?: return Result(1f, 0f, false, "Model লোড হয়নি")
+
+            val outputSize = outputTensor.shape()[1]  // e.g. 2 or 5
+            val output = Array(1) { FloatArray(outputSize) }
+
             val ran = synchronized(this) {
                 val interp = interpreter ?: return Result(1f, 0f, false, "Model লোড হয়নি")
                 interp.run(input, output)
@@ -89,9 +94,30 @@ class ContentClassifier(private val context: Context) {
             }
             if (!ran) return Result(1f, 0f, false, "Model লোড হয়নি")
 
-            val safe   = output[0][0]
-            val unsafe = output[0][1]
-            val adult  = unsafe >= ADULT_THRESHOLD
+            val scores = output[0]
+
+            // Determine unsafe score based on output size
+            val unsafe: Float
+            val safe: Float
+            when (outputSize) {
+                2 -> {
+                    // GantMan mobilenet_v2: [safe, unsafe]
+                    safe   = scores[0]
+                    unsafe = scores[1]
+                }
+                5 -> {
+                    // GantMan inception_v3: [drawings, hentai, neutral, porn, sexy]
+                    safe   = scores[2]           // neutral
+                    unsafe = scores[1] + scores[3] + scores[4]  // hentai + porn + sexy
+                }
+                else -> {
+                    // Unknown model — treat last output as unsafe score
+                    safe   = scores[0]
+                    unsafe = scores.last()
+                }
+            }
+
+            val adult = unsafe >= ADULT_THRESHOLD
             Result(
                 safeScore   = safe,
                 unsafeScore = unsafe,
