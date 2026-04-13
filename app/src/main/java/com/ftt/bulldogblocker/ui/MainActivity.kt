@@ -7,64 +7,56 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.view.Gravity
 import android.widget.*
-import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import com.ftt.bulldogblocker.admin.DeviceAdminReceiver
 import com.ftt.bulldogblocker.ml.ContentClassifier
 import com.ftt.bulldogblocker.service.BlockerForegroundService
 import kotlinx.coroutines.*
-import java.io.File
 import java.io.FileOutputStream
 
-/**
- * Main Dashboard.
- *
- * Sections:
- *  ① Protection status (Device Admin + Accessibility)
- *  ② Model Management  → Upload .tflite + model info card
- *  ③ Test Panel        → Pick image → run classifier → show result
- */
 class MainActivity : AppCompatActivity() {
 
-    // ── Request codes ────────────────────────────
     companion object {
-        private const val REQ_ADMIN        = 101
-        private const val REQ_MODEL_PICK   = 102
-        private const val REQ_IMAGE_PICK   = 103
+        private const val REQ_ADMIN      = 101
+        private const val REQ_MODEL_PICK = 102
+        private const val REQ_IMAGE_PICK = 103
     }
 
-    // ── Views ────────────────────────────────────
-    private lateinit var tvOverallStatus    : TextView
-    private lateinit var tvAdminStatus      : TextView
-    private lateinit var btnAdmin           : Button
-    private lateinit var tvAccessStatus     : TextView
-    private lateinit var btnAccess          : Button
-
-    // Model section
-    private lateinit var tvModelStatus      : TextView
-    private lateinit var btnUploadModel     : Button
-    private lateinit var tvModelInfo        : TextView
-
-    // Test section
-    private lateinit var ivTestImage        : ImageView
-    private lateinit var btnPickImage       : Button
-    private lateinit var btnRunTest         : Button
-    private lateinit var tvTestResult       : TextView
-    private lateinit var progressTest       : ProgressBar
+    private lateinit var tvOverallStatus  : TextView
+    private lateinit var tvAdminStatus    : TextView
+    private lateinit var btnAdmin         : Button
+    private lateinit var tvAccessStatus   : TextView
+    private lateinit var btnAccess        : Button
+    private lateinit var tvModelStatus    : TextView
+    private lateinit var tvModelInfo      : TextView
+    private lateinit var btnUploadModel   : Button
+    private lateinit var ivTestImage      : ImageView
+    private lateinit var btnPickImage     : Button
+    private lateinit var btnRunTest       : Button
+    private lateinit var tvTestResult     : TextView
+    private lateinit var progressTest     : ProgressBar
 
     private val uiScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var classifier: ContentClassifier? = null
     private var testBitmap: Bitmap? = null
 
-    // ────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         buildUi()
-        startService(Intent(this, BlockerForegroundService::class.java))
+        startForegroundServiceSafe()
+
+        if (intent.getBooleanExtra("admin_lost", false)) {
+            Toast.makeText(this,
+                "⚠️ Device Admin নিষ্ক্রিয়! পুনরায় সক্রিয় করুন।",
+                Toast.LENGTH_LONG).show()
+        }
     }
 
     override fun onResume() {
@@ -78,120 +70,159 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
-    // ════════════════════════════════════════════
-    // UI BUILD
-    // ════════════════════════════════════════════
+    // ─── Start foreground service safely ────────────────────────────
+
+    private fun startForegroundServiceSafe() {
+        try {
+            val intent = Intent(this, BlockerForegroundService::class.java)
+            // API 26+: must use startForegroundService for services that call startForeground()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
+        } catch (e: Exception) {
+            // Don't crash the activity if service fails to start
+            e.printStackTrace()
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // UI
+    // ════════════════════════════════════════════════════════════════
 
     private fun buildUi() {
         val scroll = ScrollView(this)
-        val root   = col(bg = "#0F0F1A", pad = 0).also { scroll.addView(it) }
+        val root   = vbox(bg = "#0F0F1A", pad = 0)
+        scroll.addView(root)
 
-        // ── Header ──────────────────────────────
-        root.addView(col(bg = "#1A1A35", pad = 48).apply {
+        // ── Header ──────────────────────────────────────────────────
+        root.addView(vbox(bg = "#1A1A35", pad = 48).apply {
             addView(tv("🐶", size = 40f, center = true))
             addView(tv("Bulldog Blocker", size = 24f, color = "#FFFFFF", center = true))
             addView(tv("Adult Content Protection", size = 13f, color = "#888888", center = true))
-            addView(space(12))
+            addView(gap(12))
             tvOverallStatus = tv("", size = 16f, center = true)
             addView(tvOverallStatus)
         })
 
-        root.addView(space(24))
+        root.addView(gap(24))
 
-        // ── Section 1: Protection status ────────
+        // ── Protection ──────────────────────────────────────────────
         root.addView(sectionLabel("🔐 PROTECTION"))
+
         root.addView(card().apply {
             addView(tv("Device Admin", size = 15f, color = "#FFFFFF"))
-            tvAdminStatus = tv("", size = 13f, color = "#888")
+            tvAdminStatus = tv("", size = 13f, color = "#888888")
             addView(tvAdminStatus)
-            addView(space(8))
+            addView(gap(8))
             btnAdmin = btn("সক্রিয় করুন", "#E91E63") { requestDeviceAdmin() }
             addView(btnAdmin)
         })
-        root.addView(space(8))
+
+        root.addView(gap(8))
+
         root.addView(card().apply {
             addView(tv("Accessibility Service", size = 15f, color = "#FFFFFF"))
-            tvAccessStatus = tv("", size = 13f, color = "#888")
+            tvAccessStatus = tv("", size = 13f, color = "#888888")
             addView(tvAccessStatus)
-            addView(space(8))
+            addView(gap(8))
             btnAccess = btn("সক্রিয় করুন", "#E91E63") { openAccessibility() }
             addView(btnAccess)
         })
 
-        root.addView(space(24))
+        root.addView(gap(24))
 
-        // ── Section 2: Model Upload ──────────────
+        // ── Model Upload ─────────────────────────────────────────────
         root.addView(sectionLabel("🤖 TFLITE MODEL"))
+
         root.addView(card().apply {
             tvModelStatus = tv("", size = 14f)
             addView(tvModelStatus)
-            addView(space(8))
+            addView(gap(4))
             tvModelInfo = tv("", size = 12f, color = "#AAAAAA")
             addView(tvModelInfo)
-            addView(space(12))
-            btnUploadModel = btn("📂  Model Upload করুন (.tflite)", "#1565C0") {
-                pickModelFile()
-            }
+            addView(gap(12))
+            btnUploadModel = btn("📂  Model Upload করুন (.tflite)", "#1565C0") { pickModelFile() }
             addView(btnUploadModel)
         })
 
-        root.addView(space(24))
+        root.addView(gap(24))
 
-        // ── Section 3: Test ──────────────────────
+        // ── Test Panel ───────────────────────────────────────────────
         root.addView(sectionLabel("🧪 TEST MODEL"))
-        root.addView(card().apply {
 
-            // Image preview
+        root.addView(card().apply {
             ivTestImage = ImageView(this@MainActivity).apply {
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT, 400)
                 scaleType = ImageView.ScaleType.CENTER_CROP
-                setBackgroundColor(Color.parseColor("#1E1E1E"))
+                setBackgroundColor(Color.parseColor("#222222"))
                 setImageResource(android.R.drawable.ic_menu_gallery)
             }
             addView(ivTestImage)
-            addView(space(12))
+            addView(gap(12))
 
-            // Two buttons side by side
-            addView(row().apply {
-                btnPickImage = btn("🖼 ছবি বেছে নিন", "#1565C0") { pickTestImage() }
-                    .also { it.layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
-                            addView(it) }
-                addView(space(8))
-                btnRunTest = btn("▶ Test Run করুন", "#2E7D32") { runTest() }
-                    .also { it.layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
-                            addView(it) }
-            })
+            // Row: two buttons
+            val row = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT)
+            }
+            btnPickImage = Button(this@MainActivity).apply {
+                text = "🖼 ছবি বেছে নিন"
+                setBackgroundColor(Color.parseColor("#1565C0"))
+                setTextColor(Color.WHITE)
+                layoutParams = LinearLayout.LayoutParams(0,
+                    LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                setOnClickListener { pickTestImage() }
+            }
+            btnRunTest = Button(this@MainActivity).apply {
+                text = "▶ Test করুন"
+                setBackgroundColor(Color.parseColor("#2E7D32"))
+                setTextColor(Color.WHITE)
+                layoutParams = LinearLayout.LayoutParams(0,
+                    LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    marginStart = 8
+                }
+                setOnClickListener { runTest() }
+            }
+            row.addView(btnPickImage)
+            row.addView(btnRunTest)
+            addView(row)
 
-            addView(space(12))
+            addView(gap(12))
+
             progressTest = ProgressBar(this@MainActivity).apply {
                 visibility = android.view.View.GONE
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT)
             }
             addView(progressTest)
 
-            // Result card
-            tvTestResult = tv("ছবি বেছে নিয়ে Test Run করুন", size = 15f,
-                color = "#AAAAAA", center = true).apply {
+            tvTestResult = tv("ছবি বেছে নিয়ে Test করুন",
+                size = 15f, color = "#AAAAAA", center = true).apply {
                 setPadding(24, 24, 24, 24)
                 setBackgroundColor(Color.parseColor("#1A1A1A"))
             }
             addView(tvTestResult)
         })
 
-        root.addView(space(48))
+        root.addView(gap(48))
         setContentView(scroll)
     }
 
-    // ════════════════════════════════════════════
-    // STATUS REFRESH
-    // ════════════════════════════════════════════
+    // ════════════════════════════════════════════════════════════════
+    // STATUS
+    // ════════════════════════════════════════════════════════════════
 
     private fun refreshStatus() {
         val adminOk  = DeviceAdminReceiver.isAdminActive(this)
         val accessOk = isAccessibilityEnabled()
         val modelOk  = ContentClassifier.isReady(this)
 
-        // Admin
         if (adminOk) {
             tvAdminStatus.text = "✅ সক্রিয় — আনইনস্টল ব্লক আছে"
             tvAdminStatus.setTextColor(Color.parseColor("#4CAF50"))
@@ -206,7 +237,6 @@ class MainActivity : AppCompatActivity() {
             btnAdmin.setBackgroundColor(Color.parseColor("#E91E63"))
         }
 
-        // Accessibility
         if (accessOk) {
             tvAccessStatus.text = "✅ সক্রিয় — URL ব্লকিং চালু"
             tvAccessStatus.setTextColor(Color.parseColor("#4CAF50"))
@@ -221,56 +251,50 @@ class MainActivity : AppCompatActivity() {
             btnAccess.setBackgroundColor(Color.parseColor("#E91E63"))
         }
 
-        // Model
         if (modelOk) {
-            val size = ContentClassifier.modelFile(this).length() / (1024 * 1024)
+            val mb = ContentClassifier.modelFile(this).length() / (1024 * 1024)
             tvModelStatus.text = "✅ Model লোড হয়েছে"
             tvModelStatus.setTextColor(Color.parseColor("#4CAF50"))
-            tvModelInfo.text = "📁 saved_model.tflite  •  ${size} MB  •  Internal storage"
+            tvModelInfo.text = "📁 saved_model.tflite  •  ${mb} MB"
             btnUploadModel.text = "🔄 Model পরিবর্তন করুন"
         } else {
             tvModelStatus.text = "⚠️ Model আপলোড করা হয়নি"
             tvModelStatus.setTextColor(Color.parseColor("#FF9800"))
-            tvModelInfo.text = "নিচের বোতাম চেপে .tflite ফাইল বেছে নিন"
+            tvModelInfo.text = ".tflite ফাইল বেছে নিন"
             btnUploadModel.text = "📂 Model Upload করুন (.tflite)"
         }
 
-        // Overall
-        val allOk = adminOk && accessOk && modelOk
-        tvOverallStatus.text = if (allOk) "🛡️ সম্পূর্ণ সুরক্ষিত" else "⚠️ সেটআপ অসম্পূর্ণ"
-        tvOverallStatus.setTextColor(
-            Color.parseColor(if (allOk) "#4CAF50" else "#FF9800"))
+        tvOverallStatus.text = if (adminOk && accessOk && modelOk)
+            "🛡️ সম্পূর্ণ সুরক্ষিত" else "⚠️ সেটআপ অসম্পূর্ণ"
+        tvOverallStatus.setTextColor(Color.parseColor(
+            if (adminOk && accessOk && modelOk) "#4CAF50" else "#FF9800"))
     }
 
-    // ════════════════════════════════════════════
+    // ════════════════════════════════════════════════════════════════
     // MODEL UPLOAD
-    // ════════════════════════════════════════════
+    // ════════════════════════════════════════════════════════════════
 
     private fun pickModelFile() {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
-            type = "*/*"                          // tflite MIME not always recognized
-            putExtra(Intent.EXTRA_MIME_TYPES,
-                arrayOf("application/octet-stream", "*/*"))
+            type = "*/*"
         }
         startActivityForResult(
             Intent.createChooser(intent, "saved_model.tflite বেছে নিন"),
-            REQ_MODEL_PICK
-        )
+            REQ_MODEL_PICK)
     }
 
     private fun importModel(uri: Uri) {
         uiScope.launch {
-            tvModelStatus.text = "⏳ Model কপি হচ্ছে..."
+            tvModelStatus.text = "⏳ কপি হচ্ছে..."
             tvModelStatus.setTextColor(Color.parseColor("#FF9800"))
             btnUploadModel.isEnabled = false
 
             val ok = withContext(Dispatchers.IO) {
                 try {
-                    contentResolver.openInputStream(uri)?.use { input ->
-                        FileOutputStream(ContentClassifier.modelFile(this@MainActivity)).use { out ->
-                            input.copyTo(out)
-                        }
+                    contentResolver.openInputStream(uri)?.use { inp ->
+                        FileOutputStream(ContentClassifier.modelFile(this@MainActivity))
+                            .use { out -> inp.copyTo(out) }
                     }
                     true
                 } catch (e: Exception) { e.printStackTrace(); false }
@@ -278,33 +302,32 @@ class MainActivity : AppCompatActivity() {
 
             btnUploadModel.isEnabled = true
             if (ok) {
-                Toast.makeText(this@MainActivity, "✅ Model সফলভাবে আপলোড হয়েছে!", Toast.LENGTH_SHORT).show()
-                // Pre-load classifier
+                Toast.makeText(this@MainActivity,
+                    "✅ Model আপলোড সফল!", Toast.LENGTH_SHORT).show()
                 classifier?.close()
                 classifier = ContentClassifier(this@MainActivity).also { it.load() }
             } else {
-                Toast.makeText(this@MainActivity, "❌ আপলোড ব্যর্থ হয়েছে", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@MainActivity,
+                    "❌ আপলোড ব্যর্থ", Toast.LENGTH_SHORT).show()
             }
             refreshStatus()
         }
     }
 
-    // ════════════════════════════════════════════
+    // ════════════════════════════════════════════════════════════════
     // TEST
-    // ════════════════════════════════════════════
+    // ════════════════════════════════════════════════════════════════
 
     private fun pickTestImage() {
         val intent = Intent(Intent.ACTION_PICK).apply { type = "image/*" }
         startActivityForResult(
-            Intent.createChooser(intent, "Test করার জন্য ছবি বেছে নিন"),
-            REQ_IMAGE_PICK
-        )
+            Intent.createChooser(intent, "Test Image বেছে নিন"),
+            REQ_IMAGE_PICK)
     }
 
     private fun runTest() {
-        val bmp = testBitmap
-        if (bmp == null) {
-            Toast.makeText(this, "আগে একটি ছবি বেছে নিন", Toast.LENGTH_SHORT).show()
+        val bmp = testBitmap ?: run {
+            Toast.makeText(this, "আগে ছবি বেছে নিন", Toast.LENGTH_SHORT).show()
             return
         }
         if (!ContentClassifier.isReady(this)) {
@@ -314,48 +337,44 @@ class MainActivity : AppCompatActivity() {
 
         uiScope.launch {
             progressTest.visibility = android.view.View.VISIBLE
-            btnRunTest.isEnabled = false
-            tvTestResult.text = "⏳ বিশ্লেষণ চলছে..."
+            btnRunTest.isEnabled    = false
+            tvTestResult.text       = "⏳ বিশ্লেষণ চলছে..."
             tvTestResult.setTextColor(Color.parseColor("#AAAAAA"))
+            tvTestResult.setBackgroundColor(Color.parseColor("#1A1A1A"))
 
             val result = withContext(Dispatchers.Default) {
-                if (classifier == null) {
+                if (classifier == null)
                     classifier = ContentClassifier(this@MainActivity).also { it.load() }
-                }
                 classifier!!.classify(bmp)
             }
 
             progressTest.visibility = android.view.View.GONE
-            btnRunTest.isEnabled = true
-
-            // Show result with color
+            btnRunTest.isEnabled    = true
             tvTestResult.text = buildString {
                 appendLine(result.label)
                 appendLine()
                 appendLine("Safe:   ${"%.1f".format(result.safeScore * 100)}%")
-                append("Unsafe: ${"%.1f".format(result.unsafeScore * 100)}%")
+                append  ("Unsafe: ${"%.1f".format(result.unsafeScore * 100)}%")
             }
             tvTestResult.setTextColor(
-                if (result.isAdult) Color.parseColor("#F44336")
-                else                Color.parseColor("#4CAF50")
-            )
+                if (result.isAdult) Color.parseColor("#FF5252")
+                else                Color.parseColor("#69F0AE"))
             tvTestResult.setBackgroundColor(
-                if (result.isAdult) Color.parseColor("#2A0000")
-                else                Color.parseColor("#001A00")
-            )
+                if (result.isAdult) Color.parseColor("#3E0000")
+                else                Color.parseColor("#003E1F"))
         }
     }
 
-    // ════════════════════════════════════════════
-    // PERMISSION HELPERS
-    // ════════════════════════════════════════════
+    // ════════════════════════════════════════════════════════════════
+    // PERMISSIONS
+    // ════════════════════════════════════════════════════════════════
 
     private fun requestDeviceAdmin() {
         val intent = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
             putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN,
                 DeviceAdminReceiver.getComponentName(this@MainActivity))
             putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION,
-                "App-কে Device Admin করলে সহজে আনইনস্টল করা যাবে না।")
+                "Device Admin হলে app সহজে uninstall করা যাবে না।")
         }
         startActivityForResult(intent, REQ_ADMIN)
     }
@@ -366,15 +385,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun isAccessibilityEnabled(): Boolean {
-        val svc     = "${packageName}/.service.BlockerAccessibilityService"
+        val svc = "${packageName}/.service.BlockerAccessibilityService"
         val enabled = Settings.Secure.getString(
             contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: return false
         return svc in enabled
     }
 
-    // ════════════════════════════════════════════
-    // ACTIVITY RESULTS
-    // ════════════════════════════════════════════
+    // ════════════════════════════════════════════════════════════════
+    // ACTIVITY RESULT
+    // ════════════════════════════════════════════════════════════════
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
@@ -383,27 +402,24 @@ class MainActivity : AppCompatActivity() {
 
         when (requestCode) {
             REQ_MODEL_PICK -> importModel(uri)
-
             REQ_IMAGE_PICK -> {
-                val bmp = contentResolver.openInputStream(uri)?.use {
-                    BitmapFactory.decodeStream(it)
-                } ?: return
+                val bmp = contentResolver.openInputStream(uri)
+                    ?.use { BitmapFactory.decodeStream(it) } ?: return
                 testBitmap = bmp
                 ivTestImage.setImageBitmap(bmp)
-                tvTestResult.text = "▶ Test Run করুন বোতাম চাপুন"
+                tvTestResult.text = "▶ Test করুন বোতাম চাপুন"
                 tvTestResult.setTextColor(Color.parseColor("#AAAAAA"))
                 tvTestResult.setBackgroundColor(Color.parseColor("#1A1A1A"))
             }
-
             REQ_ADMIN -> refreshStatus()
         }
     }
 
-    // ════════════════════════════════════════════
+    // ════════════════════════════════════════════════════════════════
     // UI HELPERS
-    // ════════════════════════════════════════════
+    // ════════════════════════════════════════════════════════════════
 
-    private fun col(bg: String = "#1E1E30", pad: Int = 32) =
+    private fun vbox(bg: String = "#1E1E30", pad: Int = 32) =
         LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(pad, pad, pad, pad)
@@ -413,29 +429,27 @@ class MainActivity : AppCompatActivity() {
                 LinearLayout.LayoutParams.WRAP_CONTENT)
         }
 
-    private fun row() = LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL
+    private fun card() = vbox(bg = "#1E1E30", pad = 28).apply {
+        (layoutParams as LinearLayout.LayoutParams).apply {
+            marginStart = 16; marginEnd = 16
+        }
+    }
+
+    private fun sectionLabel(text: String) = TextView(this).apply {
+        this.text = text
+        textSize  = 11f
+        setTextColor(Color.parseColor("#666666"))
+        setPadding(32, 0, 0, 8)
         layoutParams = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.WRAP_CONTENT)
     }
 
-    private fun card() = col(bg = "#1E1E30", pad = 28).apply {
-        (layoutParams as? LinearLayout.LayoutParams)?.let {
-            it.marginStart  = 16
-            it.marginEnd    = 16
-        }
-    }
-
-    private fun sectionLabel(text: String) = tv(text, size = 11f, color = "#666666").apply {
-        setPadding(32, 0, 0, 8)
-    }
-
     private fun tv(
-        text:   String,
-        size:   Float  = 14f,
-        color:  String = "#DDDDDD",
-        center: Boolean = false
+        text:    String,
+        size:    Float   = 14f,
+        color:   String  = "#DDDDDD",
+        center:  Boolean = false
     ) = TextView(this).apply {
         this.text = text
         textSize  = size
@@ -458,7 +472,7 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener { onClick() }
         }
 
-    private fun space(dp: Int) = android.view.View(this).apply {
+    private fun gap(dp: Int) = android.view.View(this).apply {
         layoutParams = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, dp)
     }

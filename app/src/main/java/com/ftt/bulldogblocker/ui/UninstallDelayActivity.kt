@@ -1,170 +1,186 @@
 package com.ftt.bulldogblocker.ui
 
-import android.app.Activity
 import android.app.admin.DevicePolicyManager
 import android.content.Intent
+import android.graphics.Color
+import android.net.Uri
 import android.os.Bundle
 import android.os.CountDownTimer
-import android.view.View
-import android.widget.Button
-import android.widget.ProgressBar
-import android.widget.TextView
-import com.ftt.bulldogblocker.R
+import android.view.Gravity
+import android.widget.*
+import androidx.appcompat.app.AppCompatActivity
 import com.ftt.bulldogblocker.admin.DeviceAdminReceiver
 
 /**
- * Uninstall Delay Screen.
+ * Uninstall Delay Screen — enforces a 60-second wait before uninstall.
  *
- * Shown when the user attempts to uninstall the app.
- * Forces a 60-second wait, then offers two buttons:
- *   ① Cancel  → finish (stay protected)
- *   ② Proceed → deactivate Device Admin, then open real uninstall
+ * MUST extend AppCompatActivity — MaterialComponents theme requires it.
  *
  * Flow:
- *   Uninstall tap → this screen → 60s countdown → user confirms →
- *   admin deactivated → normal uninstall dialog opens.
+ *   User tries to uninstall → Accessibility intercepts → this screen opens
+ *   → 60s countdown → "Proceed" button unlocks → admin deactivated → uninstall opens
  */
-class UninstallDelayActivity : Activity() {
+class UninstallDelayActivity : AppCompatActivity() {
 
     companion object {
-        private const val DELAY_MS = 60_000L    // 60 seconds — adjust as needed
+        private const val DELAY_MS = 60_000L
         private const val TICK_MS  = 1_000L
     }
 
-    private lateinit var tvTitle:       TextView
-    private lateinit var tvCountdown:   TextView
-    private lateinit var tvWarning:     TextView
-    private lateinit var progressBar:   ProgressBar
-    private lateinit var btnCancel:     Button
-    private lateinit var btnProceed:    Button
+    private lateinit var tvCountdown:  TextView
+    private lateinit var progressBar:  ProgressBar
+    private lateinit var btnCancel:    Button
+    private lateinit var btnProceed:   Button
 
     private var timer: CountDownTimer? = null
     private var countdownDone = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        // ── Build UI programmatically (no XML needed) ──
-        buildUi()
+        setContentView(buildLayout())
         startCountdown()
     }
 
-    private fun buildUi() {
-        val root = android.widget.LinearLayout(this).apply {
-            orientation = android.widget.LinearLayout.VERTICAL
-            setPadding(64, 120, 64, 64)
-            gravity = android.view.Gravity.CENTER
-            setBackgroundColor(android.graphics.Color.parseColor("#1A1A2E"))
+    // ─── Layout ─────────────────────────────────────────────────────
+
+    private fun buildLayout(): ScrollView {
+        val scroll = ScrollView(this)
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity     = Gravity.CENTER_HORIZONTAL
+            setPadding(56, 100, 56, 56)
+            setBackgroundColor(Color.parseColor("#1A0000"))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.MATCH_PARENT
+            )
         }
 
-        tvTitle = TextView(this).apply {
-            text = "🐶 Bulldog Blocker"
+        fun lp() = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        )
+
+        root.addView(TextView(this).apply {
+            text     = "🐶 Bulldog Blocker"
             textSize = 26f
-            setTextColor(android.graphics.Color.WHITE)
-            gravity = android.view.Gravity.CENTER
-        }
+            setTextColor(Color.WHITE)
+            gravity  = Gravity.CENTER
+            layoutParams = lp()
+        })
 
-        val tvSub = TextView(this).apply {
-            text = "আনইনস্টল সুরক্ষা সক্রিয়"
-            textSize = 16f
-            setTextColor(android.graphics.Color.parseColor("#AAAAAA"))
-            gravity = android.view.Gravity.CENTER
+        root.addView(TextView(this).apply {
+            text     = "আনইনস্টল সুরক্ষা সক্রিয়"
+            textSize = 15f
+            setTextColor(Color.parseColor("#AAAAAA"))
+            gravity  = Gravity.CENTER
             setPadding(0, 8, 0, 40)
-        }
+            layoutParams = lp()
+        })
 
-        tvWarning = TextView(this).apply {
+        root.addView(TextView(this).apply {
             text = "⚠️ আনইনস্টল করতে চাইলে নিচে অপেক্ষা করুন।\n" +
                    "আপনার সন্তানের সুরক্ষা সরিয়ে ফেলার আগে নিশ্চিত হন।"
-            textSize = 15f
-            setTextColor(android.graphics.Color.parseColor("#FF9800"))
-            gravity = android.view.Gravity.CENTER
+            textSize = 14f
+            setTextColor(Color.parseColor("#FF9800"))
+            gravity  = Gravity.CENTER
             setPadding(0, 0, 0, 32)
-        }
+            layoutParams = lp()
+        })
 
-        progressBar = ProgressBar(this, null,
-            android.R.attr.progressBarStyleHorizontal).apply {
+        progressBar = ProgressBar(
+            this, null, android.R.attr.progressBarStyleHorizontal
+        ).apply {
             max = (DELAY_MS / TICK_MS).toInt()
             progress = 0
+            layoutParams = lp()
         }
+        root.addView(progressBar)
 
         tvCountdown = TextView(this).apply {
-            text = "${DELAY_MS / 1000} সেকেন্ড বাকি..."
+            text     = "${DELAY_MS / 1000} সেকেন্ড বাকি..."
             textSize = 18f
-            setTextColor(android.graphics.Color.WHITE)
-            gravity = android.view.Gravity.CENTER
+            setTextColor(Color.WHITE)
+            gravity  = Gravity.CENTER
             setPadding(0, 16, 0, 48)
+            layoutParams = lp()
         }
+        root.addView(tvCountdown)
 
         btnCancel = Button(this).apply {
-            text = "❌ বাতিল করুন (সুরক্ষিত থাকুন)"
-            setBackgroundColor(android.graphics.Color.parseColor("#2E7D32"))
-            setTextColor(android.graphics.Color.WHITE)
+            text = "❌ বাতিল — সুরক্ষিত থাকুন"
+            setBackgroundColor(Color.parseColor("#2E7D32"))
+            setTextColor(Color.WHITE)
+            layoutParams = lp()
             setOnClickListener { finish() }
         }
+        root.addView(btnCancel)
+
+        // spacer
+        root.addView(android.view.View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 16)
+        })
 
         btnProceed = Button(this).apply {
-            text = "আনইনস্টল করুন"
-            setBackgroundColor(android.graphics.Color.parseColor("#C62828"))
-            setTextColor(android.graphics.Color.WHITE)
+            text     = "আনইনস্টল করুন (অপেক্ষা করুন...)"
+            setBackgroundColor(Color.parseColor("#C62828"))
+            setTextColor(Color.WHITE)
             isEnabled = false
-            alpha = 0.4f
+            alpha     = 0.4f
+            layoutParams = lp()
             setOnClickListener { proceedWithUninstall() }
         }
+        root.addView(btnProceed)
 
-        root.apply {
-            addView(tvTitle)
-            addView(tvSub)
-            addView(tvWarning)
-            addView(progressBar)
-            addView(tvCountdown)
-            addView(btnCancel)
-            addView(android.view.View(context).apply {
-                layoutParams = android.widget.LinearLayout.LayoutParams(
-                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT, 16)
-            })
-            addView(btnProceed)
-        }
-
-        setContentView(root)
+        scroll.addView(root)
+        return scroll
     }
 
-    private fun startCountdown() {
-        val total = (DELAY_MS / TICK_MS).toInt()
-        timer = object : CountDownTimer(DELAY_MS, TICK_MS) {
-            override fun onTick(millisUntilFinished: Long) {
-                val secsLeft = millisUntilFinished / 1000
-                tvCountdown.text = "$secsLeft সেকেন্ড বাকি..."
-                progressBar.progress = total - secsLeft.toInt()
-            }
+    // ─── Countdown ──────────────────────────────────────────────────
 
+    private fun startCountdown() {
+        val totalTicks = (DELAY_MS / TICK_MS).toInt()
+        timer = object : CountDownTimer(DELAY_MS, TICK_MS) {
+            override fun onTick(ms: Long) {
+                val secs = ms / 1000
+                tvCountdown.text = "$secs সেকেন্ড বাকি..."
+                progressBar.progress = totalTicks - secs.toInt()
+            }
             override fun onFinish() {
-                tvCountdown.text = "✅ এখন আনইনস্টল করা সম্ভব"
-                progressBar.progress = total
+                tvCountdown.text = "✅ এখন আনইনস্টল করতে পারবেন"
+                progressBar.progress = totalTicks
                 btnProceed.isEnabled = true
-                btnProceed.alpha = 1f
+                btnProceed.alpha     = 1f
+                btnProceed.text      = "আনইনস্টল করুন"
                 countdownDone = true
             }
         }.start()
     }
 
+    // ─── Proceed ────────────────────────────────────────────────────
+
     private fun proceedWithUninstall() {
         if (!countdownDone) return
+        // Step 1: Remove Device Admin (required before uninstall)
+        try {
+            val dpm = getSystemService(DEVICE_POLICY_SERVICE) as DevicePolicyManager
+            dpm.removeActiveAdmin(DeviceAdminReceiver.getComponentName(this))
+        } catch (e: Exception) { /* already removed */ }
 
-        // Step 1: Deactivate Device Admin (required before uninstall)
-        val dpm = getSystemService(DEVICE_POLICY_SERVICE) as DevicePolicyManager
-        dpm.removeActiveAdmin(DeviceAdminReceiver.getComponentName(this))
-
-        // Step 2: Open standard uninstall dialog
-        val intent = Intent(Intent.ACTION_DELETE).apply {
-            data = android.net.Uri.parse("package:com.ftt.bulldogblocker")
+        // Step 2: Open system uninstall dialog
+        startActivity(Intent(Intent.ACTION_DELETE).apply {
+            data = Uri.parse("package:${packageName}")
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        startActivity(intent)
+        })
         finish()
     }
 
+    // ─── Lifecycle ──────────────────────────────────────────────────
+
     override fun onBackPressed() {
-        // Prevent back button from skipping the countdown
+        // Block back button during countdown
         if (!countdownDone) return
         super.onBackPressed()
     }
