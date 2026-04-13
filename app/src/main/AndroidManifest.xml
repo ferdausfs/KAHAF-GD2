@@ -10,11 +10,18 @@
     <uses-permission android:name="android.permission.BIND_DEVICE_ADMIN" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
+    <!-- FIX: Custom signature-level permission for internal restart broadcast.
+         RECEIVE_BOOT_COMPLETED is a normal permission any app can hold.
+         This custom permission ensures ONLY our own app can send RESTART_SERVICE. -->
+    <uses-permission android:name="com.ftt.bulldogblocker.RESTART_PERMISSION" />
+
+    <permission
+        android:name="com.ftt.bulldogblocker.RESTART_PERMISSION"
+        android:protectionLevel="signature" />
 
     <application
         android:allowBackup="false"
@@ -37,16 +44,10 @@
 
         <activity
             android:name=".ui.UninstallDelayActivity"
-            android:exported="true"
+            android:exported="false"
             android:showWhenLocked="true"
             android:turnScreenOn="true"
-            android:theme="@style/Theme.BulldogBlocker.Fullscreen">
-            <intent-filter>
-                <action android:name="android.intent.action.DELETE" />
-                <data android:scheme="package" />
-                <category android:name="android.intent.category.DEFAULT" />
-            </intent-filter>
-        </activity>
+            android:theme="@style/Theme.BulldogBlocker.Fullscreen" />
 
         <activity
             android:name=".ui.BlockScreenActivity"
@@ -87,7 +88,8 @@
 
         <receiver
             android:name=".receiver.BootReceiver"
-            android:exported="true">
+            android:exported="true"
+            android:permission="com.ftt.bulldogblocker.RESTART_PERMISSION">
             <intent-filter android:priority="999">
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />

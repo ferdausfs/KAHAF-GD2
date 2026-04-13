@@ -91,10 +91,13 @@ class ScreenshotBlocker(
         scope.launch {
             var bmp: Bitmap? = null
             try {
-                bmp = Bitmap.wrapHardwareBuffer(
-                    result.hardwareBuffer,
-                    result.colorSpace
-                )?.copy(Bitmap.Config.ARGB_8888, false)
+                // FIX: hardwareBuffer can be null on some devices/ROMs — guard with ?.
+                val hb = result.hardwareBuffer ?: run {
+                    busy = false
+                    return@launch
+                }
+                bmp = Bitmap.wrapHardwareBuffer(hb, result.colorSpace)
+                    ?.copy(Bitmap.Config.ARGB_8888, false)
 
                 val c = classifier
                 if (bmp != null && c != null && c.isLoaded()) {
@@ -110,8 +113,8 @@ class ScreenshotBlocker(
             } catch (e: Exception) {
                 Log.e(TAG, "analyze error", e)
             } finally {
-                try { result.hardwareBuffer.close() } catch (_: Exception) {}
-                try { bmp?.recycle() }              catch (_: Exception) {}
+                try { result.hardwareBuffer?.close() } catch (_: Exception) {}
+                try { bmp?.recycle() }               catch (_: Exception) {}
                 busy = false
             }
         }

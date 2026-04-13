@@ -40,7 +40,10 @@ class BlockerAccessibilityService : AccessibilityService() {
     }
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
-    private var classifier: ContentClassifier? = null
+    // FIX: @Volatile — classifier is written from Main thread (modelReloadReceiver)
+    // and read from Default dispatcher (loadClassifier coroutine). Without @Volatile,
+    // CPU cache may serve a stale null/non-null value to the other thread.
+    @Volatile private var classifier: ContentClassifier? = null
     private var classifierLoaded = false
 
     // Held as Any? — zero compile-time API-30 type references in THIS file.
@@ -96,12 +99,15 @@ class BlockerAccessibilityService : AccessibilityService() {
             val ok = c.load()
             classifierLoaded = ok
             if (ok) {
+                // FIX: Close old classifier before replacing — prevents TFLite memory leak
+                classifier?.close()
                 classifier = c
                 Log.d(TAG, "Classifier loaded")
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     startScreenshotBlocker(c)
                 }
             } else {
+                c.close() // FIX: Close the failed classifier too
                 delay(30_000L)
                 classifierLoaded = false
                 loadClassifier()
@@ -142,8 +148,9 @@ class BlockerAccessibilityService : AccessibilityService() {
     private fun handleUninstallViaInstaller(event: AccessibilityEvent) {
         val root = rootInActiveWindow ?: return
         try {
-            if ("bulldog" in collectAllText(root).lowercase() ||
-                OUR_PACKAGE in collectAllText(root).lowercase()) launchUninstallDelay()
+            // FIX: collectAllText called once — was called twice before (redundant + slow)
+            val text = collectAllText(root).lowercase()
+            if ("bulldog" in text || OUR_PACKAGE in text) launchUninstallDelay()
         } finally { root.recycle() }
     }
 
@@ -200,11 +207,14 @@ class BlockerAccessibilityService : AccessibilityService() {
         return findEditableText(root)
     }
 
-    private fun findEditableText(node: AccessibilityNodeInfo): String? {
+    private fun findEditableText(node: AccessibilityNodeInfo, depth: Int = 0): String? {
+        // FIX: Depth limit — some browser DOMs are deeply nested (50+ levels).
+        // Without this, complex pages cause StackOverflowError in the accessibility thread.
+        if (depth > 20) return null
         if (node.isEditable && node.text != null) return node.text.toString()
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
-            val r = findEditableText(child); child.recycle()
+            val r = findEditableText(child, depth + 1); child.recycle()
             if (r != null) return r
         }
         return null
@@ -212,13 +222,20 @@ class BlockerAccessibilityService : AccessibilityService() {
 
     private fun collectAllText(node: AccessibilityNodeInfo): String {
         val sb = StringBuilder()
-        fun go(n: AccessibilityNodeInfo?) {
-            n ?: return
+        // FIX: Depth limit added — same reason as findEditableText().
+        // Settings/installer screens can have deeply nested trees → StackOverflow without limit.
+        fun go(n: AccessibilityNodeInfo?, depth: Int) {
+            if (n == null || depth > 20) return
             n.text?.let { sb.append(it).append(' ') }
             n.contentDescription?.let { sb.append(it).append(' ') }
-            for (i in 0 until n.childCount) { val c = n.getChild(i) ?: continue; go(c); c.recycle() }
+            for (i in 0 until n.childCount) {
+                val c = n.getChild(i) ?: continue
+                go(c, depth + 1)
+                c.recycle()
+            }
         }
-        go(node); return sb.toString()
+        go(node, 0)
+        return sb.toString()
     }
 
     private fun registerModelReloadReceiver() {

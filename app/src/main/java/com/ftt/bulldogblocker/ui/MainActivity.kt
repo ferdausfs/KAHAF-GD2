@@ -66,6 +66,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        // FIX: Recycle testBitmap to free native memory
+        testBitmap?.recycle()
+        testBitmap = null
         classifier?.close()
         uiScope.cancel()
         super.onDestroy()
@@ -293,9 +296,11 @@ class MainActivity : AppCompatActivity() {
 
             val ok = withContext(Dispatchers.IO) {
                 try {
-                    contentResolver.openInputStream(uri)?.use { inp ->
+                    // FIX: openInputStream can return null — safe-call with ?: false
+                    val inp = contentResolver.openInputStream(uri) ?: return@withContext false
+                    inp.use { input ->
                         FileOutputStream(ContentClassifier.modelFile(this@MainActivity))
-                            .use { out -> inp.copyTo(out) }
+                            .use { out -> input.copyTo(out) }
                     }
                     true
                 } catch (e: Exception) { e.printStackTrace(); false }
@@ -305,9 +310,13 @@ class MainActivity : AppCompatActivity() {
             if (ok) {
                 Toast.makeText(this@MainActivity,
                     "✅ Model আপলোড সফল!", Toast.LENGTH_SHORT).show()
+                // FIX: load() creates TFLite Interpreter (CPU-heavy) — must run on IO thread.
+                // Previously .also { it.load() } ran on Main thread → potential ANR on large models.
                 classifier?.close()
-                classifier = ContentClassifier(this@MainActivity).also { it.load() }
-                // Tell the running AccessibilityService to reload the classifier
+                val newClassifier = withContext(Dispatchers.IO) {
+                    ContentClassifier(applicationContext).also { it.load() }
+                }
+                classifier = newClassifier
                 sendBroadcast(android.content.Intent(BlockerAccessibilityService.ACTION_RELOAD_MODEL))
             } else {
                 Toast.makeText(this@MainActivity,
@@ -346,13 +355,24 @@ class MainActivity : AppCompatActivity() {
             tvTestResult.setBackgroundColor(Color.parseColor("#1A1A1A"))
 
             val result = withContext(Dispatchers.Default) {
+                // FIX: Use applicationContext — activity context (this@MainActivity) can be
+                // destroyed while coroutine runs, causing Context leak / null reference.
                 if (classifier == null)
-                    classifier = ContentClassifier(this@MainActivity).also { it.load() }
-                classifier!!.classify(bmp)
+                    classifier = ContentClassifier(applicationContext).also { it.load() }
+                classifier?.classify(bmp)
             }
 
             progressTest.visibility = android.view.View.GONE
             btnRunTest.isEnabled    = true
+
+            // FIX: Handle null result (classifier failed to load)
+            if (result == null) {
+                tvTestResult.text = "❌ Classifier লোড হয়নি। Model আবার আপলোড করুন।"
+                tvTestResult.setTextColor(Color.parseColor("#FF5252"))
+                tvTestResult.setBackgroundColor(Color.parseColor("#3E0000"))
+                return@launch
+            }
+
             tvTestResult.text = buildString {
                 appendLine(result.label)
                 appendLine()
@@ -388,10 +408,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun isAccessibilityEnabled(): Boolean {
-        val svc = "${packageName}/.service.BlockerAccessibilityService"
+        // FIX: Android stores accessibility service names as FULL class path, e.g.:
+        //   "com.ftt.bulldogblocker/com.ftt.bulldogblocker.service.BlockerAccessibilityService"
+        // Using relative path like "com.ftt.bulldogblocker/.service.BlockerAccessibilityService"
+        // NEVER matches → button always shows "Enable" even when service is active.
+        val fullComponent = "$packageName/${BlockerAccessibilityService::class.java.name}"
         val enabled = Settings.Secure.getString(
             contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: return false
-        return svc in enabled
+        return enabled.split(":").any { it.equals(fullComponent, ignoreCase = true) }
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -408,6 +432,8 @@ class MainActivity : AppCompatActivity() {
             REQ_IMAGE_PICK -> {
                 val bmp = contentResolver.openInputStream(uri)
                     ?.use { BitmapFactory.decodeStream(it) } ?: return
+                // FIX: Recycle old bitmap before replacing — prevents memory leak
+                testBitmap?.recycle()
                 testBitmap = bmp
                 ivTestImage.setImageBitmap(bmp)
                 tvTestResult.text = "▶ Test করুন বোতাম চাপুন"

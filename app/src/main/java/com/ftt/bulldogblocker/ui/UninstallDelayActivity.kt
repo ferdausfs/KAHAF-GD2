@@ -24,6 +24,8 @@ class UninstallDelayActivity : AppCompatActivity() {
     companion object {
         private const val DELAY_MS = 60_000L
         private const val TICK_MS  = 1_000L
+        private const val KEY_REMAINING_MS  = "remaining_ms"
+        private const val KEY_COUNTDOWN_DONE = "countdown_done"
     }
 
     private lateinit var tvCountdown : TextView
@@ -32,12 +34,30 @@ class UninstallDelayActivity : AppCompatActivity() {
 
     private var timer: CountDownTimer? = null
     private var countdownDone = false
+    // FIX: Track remaining time so screen rotation resumes from correct position
+    private var remainingMs: Long = DELAY_MS
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // FIX: Restore state across rotation — without this, every rotation resets to 60s
+        if (savedInstanceState != null) {
+            remainingMs   = savedInstanceState.getLong(KEY_REMAINING_MS, DELAY_MS)
+            countdownDone = savedInstanceState.getBoolean(KEY_COUNTDOWN_DONE, false)
+        }
         setContentView(buildLayout())
         setupBackHandler()
-        startCountdown()
+        if (countdownDone) {
+            // Already finished — just unlock the button immediately
+            onCountdownFinished()
+        } else {
+            startCountdown(remainingMs)
+        }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putLong(KEY_REMAINING_MS, remainingMs)
+        outState.putBoolean(KEY_COUNTDOWN_DONE, countdownDone)
     }
 
     override fun onDestroy() {
@@ -144,23 +164,30 @@ class UninstallDelayActivity : AppCompatActivity() {
         return scroll
     }
 
-    private fun startCountdown() {
+    private fun startCountdown(fromMs: Long = DELAY_MS) {
         val totalTicks = (DELAY_MS / TICK_MS).toInt()
-        timer = object : CountDownTimer(DELAY_MS, TICK_MS) {
+        timer = object : CountDownTimer(fromMs, TICK_MS) {
             override fun onTick(ms: Long) {
+                remainingMs = ms
                 val secs = ms / 1000
                 tvCountdown.text = "$secs seconds remaining..."
                 progressBar.progress = totalTicks - secs.toInt()
             }
             override fun onFinish() {
-                tvCountdown.text = "You may now uninstall"
-                progressBar.progress = totalTicks
-                btnProceed.isEnabled = true
-                btnProceed.alpha = 1f
-                btnProceed.text = "Uninstall"
-                countdownDone = true
+                remainingMs = 0
+                onCountdownFinished()
             }
         }.start()
+    }
+
+    private fun onCountdownFinished() {
+        val totalTicks = (DELAY_MS / TICK_MS).toInt()
+        tvCountdown.text = "You may now uninstall"
+        progressBar.progress = totalTicks
+        btnProceed.isEnabled = true
+        btnProceed.alpha = 1f
+        btnProceed.text = "Uninstall"
+        countdownDone = true
     }
 
     private fun proceedWithUninstall() {

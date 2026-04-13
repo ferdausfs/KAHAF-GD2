@@ -68,35 +68,52 @@ class ContentClassifier(private val context: Context) {
     /**
      * Classify a bitmap.
      * Call load() first. This is a blocking call — run on a background thread.
+     *
+     * FIX: synchronized on interpreter reference to prevent concurrent access crash
+     * when classifier is reloaded (via broadcast) while classify() is running.
      */
     fun classify(bitmap: Bitmap): Result {
-        val interp = interpreter
-            ?: return Result(1f, 0f, false, "Model লোড হয়নি")
+        return try {
+            val input  = bitmapToBuffer(bitmap)
+            val output = Array(1) { FloatArray(2) }
 
-        val input  = bitmapToBuffer(bitmap)
-        val output = Array(1) { FloatArray(2) }
-        interp.run(input, output)
+            // FIX: Read AND use interpreter entirely inside synchronized block.
+            // Previous code captured 'interp' OUTSIDE the lock — by the time run()
+            // was called inside the lock, the captured reference could be a closed
+            // Interpreter (close() sets interpreter=null but doesn't invalidate
+            // already-captured local references). This caused undefined behavior.
+            val ran = synchronized(this) {
+                val interp = interpreter ?: return Result(1f, 0f, false, "Model লোড হয়নি")
+                interp.run(input, output)
+                true
+            }
+            if (!ran) return Result(1f, 0f, false, "Model লোড হয়নি")
 
-        val safe   = output[0][0]
-        val unsafe = output[0][1]
-        val adult  = unsafe >= ADULT_THRESHOLD
-
-        return Result(
-            safeScore   = safe,
-            unsafeScore = unsafe,
-            isAdult     = adult,
-            label = if (adult)
-                "🚫 Adult Content — ${(unsafe * 100).toInt()}% নিশ্চিত"
-            else
-                "✅ নিরাপদ — ${(safe * 100).toInt()}% নিশ্চিত"
-        )
+            val safe   = output[0][0]
+            val unsafe = output[0][1]
+            val adult  = unsafe >= ADULT_THRESHOLD
+            Result(
+                safeScore   = safe,
+                unsafeScore = unsafe,
+                isAdult     = adult,
+                label = if (adult)
+                    "🚫 Adult Content — ${(unsafe * 100).toInt()}% নিশ্চিত"
+                else
+                    "✅ নিরাপদ — ${(safe * 100).toInt()}% নিশ্চিত"
+            )
+        } catch (e: Exception) {
+            e.printStackTrace()
+            Result(1f, 0f, false, "বিশ্লেষণ ব্যর্থ: ${e.message}")
+        }
     }
 
     fun isLoaded(): Boolean = interpreter != null
 
     fun close() {
-        interpreter?.close()
-        interpreter = null
+        synchronized(this) {
+            interpreter?.close()
+            interpreter = null
+        }
     }
 
     // ─── Helpers ────────────────────────────────────────────────────
@@ -123,9 +140,11 @@ class ContentClassifier(private val context: Context) {
     }
 
     private fun loadMapped(f: File): MappedByteBuffer {
-        val fis = FileInputStream(f)
-        return fis.channel.use { ch ->
-            ch.map(FileChannel.MapMode.READ_ONLY, 0, ch.size())
+        // FIX: FileInputStream must be closed explicitly.
+        // Previously `fis.channel.use { }` closed the channel but not the FileInputStream.
+        // Now we use `fis.use { }` which closes both the stream AND the channel.
+        FileInputStream(f).use { fis ->
+            return fis.channel.map(FileChannel.MapMode.READ_ONLY, 0, fis.channel.size())
         }
     }
 }

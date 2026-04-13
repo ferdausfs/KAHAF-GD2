@@ -54,11 +54,13 @@ class BlockerForegroundService : Service() {
     override fun onDestroy() {
         serviceScope.cancel()
         super.onDestroy()
-        // Restart self via BootReceiver broadcast
+        // FIX: Use explicit Intent with component — setClass sets the component correctly.
+        // Previously the action string and setClass were redundant; keep setClass only.
         try {
-            sendBroadcast(Intent("com.ftt.bulldogblocker.RESTART_SERVICE").apply {
-                setClass(this@BlockerForegroundService, BootReceiver::class.java)
-            })
+            val restartIntent = Intent(this, BootReceiver::class.java).apply {
+                action = "com.ftt.bulldogblocker.RESTART_SERVICE"
+            }
+            sendBroadcast(restartIntent)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to send restart broadcast", e)
         }
