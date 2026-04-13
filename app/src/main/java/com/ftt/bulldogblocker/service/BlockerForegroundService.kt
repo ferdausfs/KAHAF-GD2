@@ -9,6 +9,7 @@ import android.content.Intent
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import com.ftt.bulldogblocker.receiver.BootReceiver
 import com.ftt.bulldogblocker.ui.MainActivity
 import kotlinx.coroutines.*
 
