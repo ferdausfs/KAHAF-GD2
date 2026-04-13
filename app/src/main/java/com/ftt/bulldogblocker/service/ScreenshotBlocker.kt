@@ -196,7 +196,8 @@ class ScreenshotBlocker(
         var totalBrightness = 0L
         val pixels = IntArray(32 * 32)
         sample.getPixels(pixels, 0, 32, 0, 0, 32, 32)
-        sample.recycle()
+        // BUG FIX: createScaledBitmap returns same object if already 32×32 — guard before recycle
+        if (sample !== bmp) sample.recycle()
         for (p in pixels) {
             val r = (p shr 16) and 0xFF
             val g = (p shr 8)  and 0xFF

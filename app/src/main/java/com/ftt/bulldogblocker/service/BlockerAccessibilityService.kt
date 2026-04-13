@@ -62,6 +62,7 @@ class BlockerAccessibilityService : AccessibilityService() {
     @Volatile private var lastBlockTime     = 0L
     @Volatile private var lastUninstallTime = 0L
     private var urlDebounceJob: Job?        = null
+    private var windowDebounceJob: Job?     = null  // BUG FIX: separate job — shared job caused browser/social events to cancel each other
 
     // ── App list cache (reload on broadcast) ─────────────────────────
     @Volatile private var blacklistCache: Set<String> = emptySet()
@@ -248,7 +249,8 @@ class BlockerAccessibilityService : AccessibilityService() {
     private fun handleWindowTextEvent(event: AccessibilityEvent) {
         if (event.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED &&
             event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
-        debounceCheck {
+        // BUG FIX: dedicated windowDebounceJob — avoids cancelling browser URL debounce
+        debounceWindowCheck {
             val root = rootInActiveWindow ?: return@debounceCheck
             try {
                 val text = collectAllText(root).lowercase()
@@ -265,6 +267,16 @@ class BlockerAccessibilityService : AccessibilityService() {
     private fun debounceCheck(block: suspend CoroutineScope.() -> Unit) {
         urlDebounceJob?.cancel()
         urlDebounceJob = serviceScope.launch {
+            delay(URL_DEBOUNCE)
+            if (System.currentTimeMillis() - lastBlockTime < BLOCK_COOLDOWN) return@launch
+            block()
+        }
+    }
+
+    // BUG FIX: separate debounce for window-text events so they don't cancel URL debounce
+    private fun debounceWindowCheck(block: suspend CoroutineScope.() -> Unit) {
+        windowDebounceJob?.cancel()
+        windowDebounceJob = serviceScope.launch {
             delay(URL_DEBOUNCE)
             if (System.currentTimeMillis() - lastBlockTime < BLOCK_COOLDOWN) return@launch
             block()

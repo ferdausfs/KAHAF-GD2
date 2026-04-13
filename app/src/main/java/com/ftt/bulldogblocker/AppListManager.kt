@@ -91,7 +91,8 @@ object AppListManager {
 
     fun getInstalledUserApps(ctx: Context): List<AppInfo> {
         val pm = ctx.packageManager
-        return pm.getInstalledApplications(PackageManager.GET_META_DATA)
+        // BUG FIX: was GET_META_DATA which loads all app metadata (slow + memory wasteful)
+        return pm.getInstalledApplications(0)
             .filter { (it.flags and ApplicationInfo.FLAG_SYSTEM) == 0 }
             .filter { it.packageName != ctx.packageName }
             .map { AppInfo(pm.getApplicationLabel(it).toString(), it.packageName) }

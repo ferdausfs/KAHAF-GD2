@@ -525,7 +525,10 @@ class MainActivity : AppCompatActivity() {
                     ContentClassifier(applicationContext).also { it.load() }
                 }
                 classifier = newClassifier
-                sendBroadcast(Intent(BlockerAccessibilityService.ACTION_RELOAD_MODEL))
+                // BUG FIX: add setPackage() — unprotected broadcast allowed any app to trigger model reload
+                sendBroadcast(Intent(BlockerAccessibilityService.ACTION_RELOAD_MODEL).apply {
+                    setPackage(packageName)
+                })
             } else {
                 Toast.makeText(this@MainActivity, "❌ আপলোড ব্যর্থ", Toast.LENGTH_SHORT).show()
             }
