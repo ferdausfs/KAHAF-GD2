@@ -9,6 +9,7 @@ import android.os.Build
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import com.ftt.bulldogblocker.AppListManager
 import com.ftt.bulldogblocker.ml.ContentClassifier
 import com.ftt.bulldogblocker.ui.BlockScreenActivity
 import com.ftt.bulldogblocker.ui.UninstallDelayActivity
@@ -27,32 +28,46 @@ class BlockerAccessibilityService : AccessibilityService() {
             "com.brave.browser", "com.microsoft.emmx", "com.UCMobile.intl",
             "com.sec.android.app.sbrowser", "com.kiwibrowser.browser"
         )
+        // Social apps — window text scan (কোনো URL bar নেই)
+        private val SOCIAL_PACKAGES = setOf(
+            "com.facebook.katana", "com.facebook.lite",
+            "com.twitter.android", "com.x.android",
+            "com.instagram.android", "com.whatsapp",
+            "com.snapchat.android", "com.reddit.frontpage"
+        )
         private val INSTALLER_PACKAGES = setOf(
             "com.android.packageinstaller", "com.google.android.packageinstaller",
             "com.miui.packageinstaller"
         )
+
         const val ACTION_RELOAD_MODEL = "com.ftt.bulldogblocker.RELOAD_MODEL"
+
         private val BLOCKED_KEYWORDS = listOf(
             "porn","xxx","adult","sex","nude","nsfw","hentai","erotic",
             "xvideos","xhamster","pornhub","redtube","youporn","onlyfans",
-            "chaturbate","xnxx","brazzers","bangbros"
+            "chaturbate","xnxx","brazzers","bangbros","18+","nudity",
+            "sexy","boobs","tits","ass","dick","cock","pussy","vagina",
+            "penis","naked","strip","lingerie","bikini model","hot girls"
         )
     }
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
-    // FIX: @Volatile — classifier is written from Main thread (modelReloadReceiver)
-    // and read from Default dispatcher (loadClassifier coroutine). Without @Volatile,
-    // CPU cache may serve a stale null/non-null value to the other thread.
+
     @Volatile private var classifier: ContentClassifier? = null
     private var classifierLoaded = false
 
     // Held as Any? — zero compile-time API-30 type references in THIS file.
-    // This prevents VerifyError / NoClassDefFoundError on API 26-29 devices.
     private var screenshotBlocker: Any? = null
 
     @Volatile private var lastBlockTime     = 0L
     @Volatile private var lastUninstallTime = 0L
     private var urlDebounceJob: Job?        = null
+
+    // ── App list cache (reload on broadcast) ─────────────────────────
+    @Volatile private var blacklistCache: Set<String> = emptySet()
+    @Volatile private var whitelistCache: Set<String> = emptySet()
+
+    // ── Receivers ────────────────────────────────────────────────────
 
     private val modelReloadReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context?, intent: Intent?) {
@@ -65,19 +80,37 @@ class BlockerAccessibilityService : AccessibilityService() {
         }
     }
 
+    private val listsChangedReceiver = object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context?, intent: Intent?) {
+            if (intent?.action == AppListManager.ACTION_LISTS_CHANGED) {
+                reloadAppLists()
+            }
+        }
+    }
+
+    // ── Lifecycle ────────────────────────────────────────────────────
+
     override fun onServiceConnected() {
         Log.d(TAG, "Service connected")
+        reloadAppLists()
         loadClassifier()
-        registerModelReloadReceiver()
+        registerReceivers()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         event ?: return
         val pkg = event.packageName?.toString() ?: return
+
+        // Whitelist → সব skip
+        if (pkg in whitelistCache) return
+
         when {
             pkg in INSTALLER_PACKAGES     -> handleUninstallViaInstaller(event)
             pkg == "com.android.settings" -> handleUninstallViaSettings(event)
             pkg in BROWSER_PACKAGES       -> handleBrowserEvent(event)
+            // Social apps + user-defined blacklist apps → window text keyword scan
+            pkg in SOCIAL_PACKAGES        -> handleWindowTextEvent(event)
+            pkg in blacklistCache         -> handleWindowTextEvent(event)
         }
     }
 
@@ -90,7 +123,18 @@ class BlockerAccessibilityService : AccessibilityService() {
         classifier?.close()
         classifier = null
         try { unregisterReceiver(modelReloadReceiver) } catch (_: Exception) {}
+        try { unregisterReceiver(listsChangedReceiver) } catch (_: Exception) {}
     }
+
+    // ── App list cache ────────────────────────────────────────────────
+
+    private fun reloadAppLists() {
+        blacklistCache = AppListManager.getBlacklist(applicationContext)
+        whitelistCache = AppListManager.getWhitelist(applicationContext)
+        Log.d(TAG, "Lists reloaded — black:${blacklistCache.size} white:${whitelistCache.size}")
+    }
+
+    // ── Classifier ───────────────────────────────────────────────────
 
     private fun loadClassifier() {
         if (classifierLoaded) return
@@ -99,7 +143,6 @@ class BlockerAccessibilityService : AccessibilityService() {
             val ok = c.load()
             classifierLoaded = ok
             if (ok) {
-                // FIX: Close old classifier before replacing — prevents TFLite memory leak
                 classifier?.close()
                 classifier = c
                 Log.d(TAG, "Classifier loaded")
@@ -107,7 +150,7 @@ class BlockerAccessibilityService : AccessibilityService() {
                     startScreenshotBlocker(c)
                 }
             } else {
-                c.close() // FIX: Close the failed classifier too
+                c.close()
                 delay(30_000L)
                 classifierLoaded = false
                 loadClassifier()
@@ -115,7 +158,6 @@ class BlockerAccessibilityService : AccessibilityService() {
         }
     }
 
-    // ScreenshotBlocker instantiated only on API 30+
     private fun startScreenshotBlocker(c: ContentClassifier) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
         val existing = screenshotBlocker as? ScreenshotBlocker
@@ -131,12 +173,15 @@ class BlockerAccessibilityService : AccessibilityService() {
         screenshotBlocker = blocker
     }
 
+    // ── Block trigger ─────────────────────────────────────────────────
+
     private fun triggerBlock(reason: String) {
         val now = System.currentTimeMillis()
         if (now - lastBlockTime < BLOCK_COOLDOWN) return
         lastBlockTime = now
         (screenshotBlocker as? ScreenshotBlocker)?.resetCooldown()
-        performGlobalAction(GLOBAL_ACTION_BACK)
+        // BUG FIX: BACK → HOME — browser থেকে সম্পূর্ণ বের হয়
+        performGlobalAction(GLOBAL_ACTION_HOME)
         try {
             startActivity(Intent(this, BlockScreenActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
@@ -145,10 +190,11 @@ class BlockerAccessibilityService : AccessibilityService() {
         } catch (e: Exception) { Log.e(TAG, "launch BlockScreen failed", e) }
     }
 
+    // ── Uninstall protection ──────────────────────────────────────────
+
     private fun handleUninstallViaInstaller(event: AccessibilityEvent) {
         val root = rootInActiveWindow ?: return
         try {
-            // FIX: collectAllText called once — was called twice before (redundant + slow)
             val text = collectAllText(root).lowercase()
             if ("bulldog" in text || OUR_PACKAGE in text) launchUninstallDelay()
         } finally { root.recycle() }
@@ -173,22 +219,51 @@ class BlockerAccessibilityService : AccessibilityService() {
         } catch (e: Exception) { Log.e(TAG, "launch UninstallDelay failed", e) }
     }
 
+    // ── Browser event — URL bar keyword check ─────────────────────────
+
     private fun handleBrowserEvent(event: AccessibilityEvent) {
         if (event.eventType != AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED &&
             event.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) return
-        urlDebounceJob?.cancel()
-        urlDebounceJob = serviceScope.launch {
-            delay(URL_DEBOUNCE)
-            if (System.currentTimeMillis() - lastBlockTime < BLOCK_COOLDOWN) return@launch
-            val root = rootInActiveWindow ?: return@launch
+        debounceCheck {
+            val root = rootInActiveWindow ?: return@debounceCheck
             try {
-                val url = getUrlBarText(root)?.lowercase() ?: return@launch
+                val url = getUrlBarText(root)?.lowercase() ?: return@debounceCheck
                 if (BLOCKED_KEYWORDS.any { url.contains(it) }) {
                     withContext(Dispatchers.Main) { triggerBlock("ব্লক করা সাইট: $url") }
                 }
             } finally { root.recycle() }
         }
     }
+
+    // ── Social / Blacklist apps — window text keyword scan ────────────
+
+    private fun handleWindowTextEvent(event: AccessibilityEvent) {
+        if (event.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED &&
+            event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+        debounceCheck {
+            val root = rootInActiveWindow ?: return@debounceCheck
+            try {
+                val text = collectAllText(root).lowercase()
+                val hit = BLOCKED_KEYWORDS.firstOrNull { text.contains(it) }
+                if (hit != null) {
+                    withContext(Dispatchers.Main) { triggerBlock("ব্লক করা কন্টেন্ট: $hit") }
+                }
+            } finally { root.recycle() }
+        }
+    }
+
+    // ── Debounce helper ───────────────────────────────────────────────
+
+    private fun debounceCheck(block: suspend CoroutineScope.() -> Unit) {
+        urlDebounceJob?.cancel()
+        urlDebounceJob = serviceScope.launch {
+            delay(URL_DEBOUNCE)
+            if (System.currentTimeMillis() - lastBlockTime < BLOCK_COOLDOWN) return@launch
+            block()
+        }
+    }
+
+    // ── URL bar helpers ───────────────────────────────────────────────
 
     private fun getUrlBarText(root: AccessibilityNodeInfo): String? {
         listOf(
@@ -208,8 +283,6 @@ class BlockerAccessibilityService : AccessibilityService() {
     }
 
     private fun findEditableText(node: AccessibilityNodeInfo, depth: Int = 0): String? {
-        // FIX: Depth limit — some browser DOMs are deeply nested (50+ levels).
-        // Without this, complex pages cause StackOverflowError in the accessibility thread.
         if (depth > 20) return null
         if (node.isEditable && node.text != null) return node.text.toString()
         for (i in 0 until node.childCount) {
@@ -222,8 +295,6 @@ class BlockerAccessibilityService : AccessibilityService() {
 
     private fun collectAllText(node: AccessibilityNodeInfo): String {
         val sb = StringBuilder()
-        // FIX: Depth limit added — same reason as findEditableText().
-        // Settings/installer screens can have deeply nested trees → StackOverflow without limit.
         fun go(n: AccessibilityNodeInfo?, depth: Int) {
             if (n == null || depth > 20) return
             n.text?.let { sb.append(it).append(' ') }
@@ -238,14 +309,24 @@ class BlockerAccessibilityService : AccessibilityService() {
         return sb.toString()
     }
 
-    private fun registerModelReloadReceiver() {
-        try {
-            val f = IntentFilter(ACTION_RELOAD_MODEL)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
-                registerReceiver(modelReloadReceiver, f, RECEIVER_NOT_EXPORTED)
-            else
-                @Suppress("UnspecifiedRegisterReceiverFlag")
-                registerReceiver(modelReloadReceiver, f)
-        } catch (e: Exception) { Log.e(TAG, "registerReceiver error", e) }
+    // ── Receiver registration ─────────────────────────────────────────
+
+    private fun registerReceivers() {
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+            RECEIVER_NOT_EXPORTED else 0
+
+        fun reg(receiver: BroadcastReceiver, action: String) {
+            try {
+                val f = IntentFilter(action)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+                    registerReceiver(receiver, f, RECEIVER_NOT_EXPORTED)
+                else
+                    @Suppress("UnspecifiedRegisterReceiverFlag")
+                    registerReceiver(receiver, f)
+            } catch (e: Exception) { Log.e(TAG, "registerReceiver error: $action", e) }
+        }
+
+        reg(modelReloadReceiver, ACTION_RELOAD_MODEL)
+        reg(listsChangedReceiver, AppListManager.ACTION_LISTS_CHANGED)
     }
 }
