@@ -21,25 +21,21 @@ import kotlinx.coroutines.*
 class ScreenshotBlocker(
     private val service: AccessibilityService,
     private val scope: CoroutineScope,
+    // BUG FIX #1: Whitelist check lambda — BlockerAccessibilityService থেকে আসে।
+    // Foreground app whitelisted হলে screenshot নেওয়াই হয় না।
+    // Default: { false } → backward compat (না পাঠালে সব block হয়)
+    private val isForegroundPkgWhitelisted: () -> Boolean = { false },
     // reason, imageHash, unsafeScore, showReportButtons
     private val onAdultDetected: (String, Long, Float, Boolean) -> Unit
 ) {
     companion object {
         private const val TAG = "BDB_Screenshot"
-        private const val INTERVAL_MS  = 300L    // প্রতি 300ms — আগে 500ms ছিল
-
-        // ── BUG FIX: SCREENSHOT_THRESHOLD আর hardcode নেই ─────────────
-        // আগে: private const val SCREENSHOT_THRESHOLD = 0.22f
-        // এখন: analyze() প্রতিবার ThresholdManager.getScreenshot() পড়ে।
-        // UI থেকে পরিবর্তন করলে সাথে সাথে কাজ করে।
-        // ──────────────────────────────────────────────────────────────
+        private const val INTERVAL_MS  = 300L
 
         private const val COOLDOWN_MS     = 3_000L
-        private const val BUSY_TIMEOUT    = 4_000L  // busy stuck হলে এর পরে force reset
+        private const val BUSY_TIMEOUT    = 4_000L
 
-        // ≥77% → সরাসরি block (কোনো report dialog নেই)
-        // <77% → block + True/False report buttons দেখাও
-        const val REPORT_THRESHOLD = 0.77f
+        const val REPORT_THRESHOLD = 0.85f
     }
 
     @Volatile private var busy          = false
@@ -57,7 +53,16 @@ class ScreenshotBlocker(
                 val now = System.currentTimeMillis()
                 if (now - lastBlock < COOLDOWN_MS) continue
 
-                // busy stuck হলে force reset (capture callback miss হলে)
+                // BUG FIX #1: Whitelisted app-এ screenshot নেওয়া বন্ধ করো
+                // এই lambda BlockerAccessibilityService থেকে আসে এবং
+                // currentForegroundPkg ∈ whitelistCache কিনা check করে।
+                // আগে: whitelist করা app খোলা থাকলেও ML loop চলতো → block হতো
+                // এখন: whitelisted হলে পুরো iteration skip
+                if (isForegroundPkgWhitelisted()) {
+                    Log.d(TAG, "Skip — foreground app is whitelisted")
+                    continue
+                }
+
                 if (busy && now - busyStartTime > BUSY_TIMEOUT) {
                     Log.w(TAG, "busy timeout — force reset")
                     busy = false
@@ -92,7 +97,7 @@ class ScreenshotBlocker(
                     }
                     override fun onFailure(errorCode: Int) {
                         busy = false
-                        if (errorCode != 2) // 2 = TAKE_SCREENSHOT_ERROR_SECURE_WINDOW (skip logging)
+                        if (errorCode != 2)
                             Log.w(TAG, "takeScreenshot failed: code=$errorCode")
                     }
                 }
@@ -117,9 +122,6 @@ class ScreenshotBlocker(
                     ?.copy(Bitmap.Config.ARGB_8888, false)
                     ?: run { busy = false; return@launch }
 
-                // ── Crop: status bar (top 7%) + nav bar (bottom 9%) বাদ দাও ──
-                // Full screen screenshot-এ UI chrome content কে dilute করে।
-                // Content area crop করলে model আরো accurate হয়।
                 val w = full.width
                 val h = full.height
                 val topCut    = (h * 0.07f).toInt()
@@ -130,8 +132,6 @@ class ScreenshotBlocker(
                     Bitmap.createBitmap(full, 0, topCut, w, cropH)
                 } else full
 
-                // ── Black screen check: FLAG_SECURE বা SurfaceView video ──
-                // যদি screen mostly কালো হয়, skip করো (classify করে লাভ নেই)
                 if (isMostlyBlack(cropped)) {
                     return@launch
                 }
@@ -139,17 +139,14 @@ class ScreenshotBlocker(
                 val c = classifier ?: return@launch
                 if (!c.isLoaded()) return@launch
 
-                // ── Image hash compute ────────────────────────────────────
                 val hash = ImageHashUtil.computeHash(cropped)
                 val ctx  = service.applicationContext
 
-                // ① False positive DB check — user আগে এই image "ভুল" বলেছে
                 if (FalsePositiveDB.isFalsePositive(ctx, hash)) {
                     Log.d(TAG, "Skip — false positive DB match (hash=$hash)")
                     return@launch
                 }
 
-                // ② Classify
                 val threshold = ThresholdManager.getScreenshot(ctx)
                 val res = c.classifyWithThreshold(cropped, threshold)
 
@@ -158,10 +155,6 @@ class ScreenshotBlocker(
                     Log.w(TAG, "Adult detected: unsafe=${score} (threshold=$threshold, hash=$hash)")
                     lastBlock = System.currentTimeMillis()
 
-                    // ③ Report button দেখাবে কিনা সিদ্ধান্ত:
-                    //    • score ≥ 77%              → সরাসরি block, কোনো report নেই
-                    //    • confirmed true DB match  → user আগে confirm করেছে, report নেই
-                    //    • score < 77% + নতুন image → block + True/False report button
                     val isConfirmed  = FalsePositiveDB.isConfirmedTrue(ctx, hash)
                     val showReport   = score < REPORT_THRESHOLD && !isConfirmed
 
@@ -187,16 +180,11 @@ class ScreenshotBlocker(
 
     // ── Helpers ───────────────────────────────────────────────────────
 
-    /**
-     * Screen mostly black = FLAG_SECURE app বা video SurfaceView।
-     * 224x224 sample-এ যদি avg brightness < 15 হয় তাহলে skip।
-     */
     private fun isMostlyBlack(bmp: Bitmap): Boolean {
         val sample = Bitmap.createScaledBitmap(bmp, 32, 32, false)
         var totalBrightness = 0L
         val pixels = IntArray(32 * 32)
         sample.getPixels(pixels, 0, 32, 0, 0, 32, 32)
-        // BUG FIX: createScaledBitmap returns same object if already 32×32 — guard before recycle
         if (sample !== bmp) sample.recycle()
         for (p in pixels) {
             val r = (p shr 16) and 0xFF
@@ -205,6 +193,6 @@ class ScreenshotBlocker(
             totalBrightness += (r + g + b)
         }
         val avg = totalBrightness / (pixels.size * 3)
-        return avg < 15  // avg brightness < 15/255 = mostly black
+        return avg < 15
     }
 }

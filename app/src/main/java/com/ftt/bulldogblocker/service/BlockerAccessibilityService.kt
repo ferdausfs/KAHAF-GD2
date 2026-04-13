@@ -28,7 +28,6 @@ class BlockerAccessibilityService : AccessibilityService() {
             "com.brave.browser", "com.microsoft.emmx", "com.UCMobile.intl",
             "com.sec.android.app.sbrowser", "com.kiwibrowser.browser"
         )
-        // Social apps — window text scan (কোনো URL bar নেই)
         private val SOCIAL_PACKAGES = setOf(
             "com.facebook.katana", "com.facebook.lite",
             "com.twitter.android", "com.x.android",
@@ -49,28 +48,35 @@ class BlockerAccessibilityService : AccessibilityService() {
             "sexy","boobs","tits","ass","dick","cock","pussy","vagina",
             "penis","naked","strip","lingerie","bikini model","hot girls"
         )
+
+        // BUG FIX #2: Word-boundary regex — substring match বাদ
+        // আগে: text.contains("ass") → "classroom", "assassin", "passenger" সব block হতো
+        // এখন: (?<![a-zA-Z])ass(?![a-zA-Z]) → শুধু standalone "ass" match করে
+        private val BLOCKED_KEYWORD_REGEXES: List<Pair<String, Regex>> by lazy {
+            BLOCKED_KEYWORDS.map { kw ->
+                kw to Regex("(?i)(?<![a-zA-Z])${Regex.escape(kw)}(?![a-zA-Z])")
+            }
+        }
     }
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
     @Volatile private var classifier: ContentClassifier? = null
-    // BUG FIX: @Volatile missing — written by broadcast receiver (main thread),
-    // read/written in loadClassifier() coroutine (Dispatchers.Default) → data race
     @Volatile private var classifierLoaded = false
-
-    // Held as Any? — zero compile-time API-30 type references in THIS file.
-    // BUG FIX: @Volatile missing — written on Dispatchers.Default (startScreenshotBlocker),
-    // read on main thread (triggerBlock, onDestroy) → data race
     @Volatile private var screenshotBlocker: Any? = null
 
     @Volatile private var lastBlockTime     = 0L
     @Volatile private var lastUninstallTime = 0L
     private var urlDebounceJob: Job?        = null
-    private var windowDebounceJob: Job?     = null  // BUG FIX: separate job — shared job caused browser/social events to cancel each other
+    private var windowDebounceJob: Job?     = null
 
-    // ── App list cache (reload on broadcast) ─────────────────────────
     @Volatile private var blacklistCache: Set<String> = emptySet()
     @Volatile private var whitelistCache: Set<String> = emptySet()
+
+    // BUG FIX #1: Foreground package tracker — ScreenshotBlocker-এর জন্য
+    // ML screenshot loop প্রতি 300ms চলে — whitelist জানে না।
+    // TYPE_WINDOW_STATE_CHANGED-এ current foreground package এখানে store হয়।
+    @Volatile private var currentForegroundPkg: String = ""
 
     // ── Receivers ────────────────────────────────────────────────────
 
@@ -106,6 +112,12 @@ class BlockerAccessibilityService : AccessibilityService() {
         event ?: return
         val pkg = event.packageName?.toString() ?: return
 
+        // BUG FIX #1: Whitelist check এর আগে foreground package track করো।
+        // Whitelisted app হলেও pkg store করা দরকার — ScreenshotBlocker check করবে।
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            currentForegroundPkg = pkg
+        }
+
         // Whitelist → সব skip
         if (pkg in whitelistCache) return
 
@@ -113,7 +125,6 @@ class BlockerAccessibilityService : AccessibilityService() {
             pkg in INSTALLER_PACKAGES     -> handleUninstallViaInstaller(event)
             pkg == "com.android.settings" -> handleUninstallViaSettings(event)
             pkg in BROWSER_PACKAGES       -> handleBrowserEvent(event)
-            // Social apps + user-defined blacklist apps → window text keyword scan
             pkg in SOCIAL_PACKAGES        -> handleWindowTextEvent(event)
             pkg in blacklistCache         -> handleWindowTextEvent(event)
         }
@@ -167,10 +178,15 @@ class BlockerAccessibilityService : AccessibilityService() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
         val existing = screenshotBlocker as? ScreenshotBlocker
         if (existing != null) { existing.updateClassifier(c); return }
+
+        // BUG FIX #1: isForegroundPkgWhitelisted lambda পাঠাও
+        // ScreenshotBlocker প্রতিটি screenshot loop iteration-এ এই lambda call করে।
+        // Foreground app whitelisted হলে screenshot নেওয়াই skip হয়।
         val blocker = ScreenshotBlocker(
-            service         = this,
-            scope           = serviceScope,
-            onAdultDetected = { reason, hash, score, showReport ->
+            service                    = this,
+            scope                      = serviceScope,
+            isForegroundPkgWhitelisted = { whitelistCache.contains(currentForegroundPkg) },
+            onAdultDetected            = { reason, hash, score, showReport ->
                 serviceScope.launch(Dispatchers.Main) { triggerBlock(reason, hash, score, showReport) }
             }
         )
@@ -190,7 +206,6 @@ class BlockerAccessibilityService : AccessibilityService() {
         if (now - lastBlockTime < BLOCK_COOLDOWN) return
         lastBlockTime = now
         (screenshotBlocker as? ScreenshotBlocker)?.resetCooldown()
-        // BUG FIX: BACK → HOME — browser থেকে সম্পূর্ণ বের হয়
         performGlobalAction(GLOBAL_ACTION_HOME)
         try {
             startActivity(Intent(this, BlockScreenActivity::class.java).apply {
@@ -206,8 +221,6 @@ class BlockerAccessibilityService : AccessibilityService() {
     // ── Uninstall protection ──────────────────────────────────────────
 
     private fun handleUninstallViaInstaller(event: AccessibilityEvent) {
-        // BUG FIX: no event type filter — was scanning full accessibility tree on EVERY event
-        // (scrolls, clicks, focus changes) from installer apps. Very expensive.
         if (event.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED &&
             event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         val root = rootInActiveWindow ?: return
@@ -218,7 +231,6 @@ class BlockerAccessibilityService : AccessibilityService() {
     }
 
     private fun handleUninstallViaSettings(event: AccessibilityEvent) {
-        // BUG FIX: same missing event type filter as handleUninstallViaInstaller
         if (event.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED &&
             event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         val root = rootInActiveWindow ?: return
@@ -247,11 +259,9 @@ class BlockerAccessibilityService : AccessibilityService() {
         debounceCheck {
             val root = rootInActiveWindow ?: return@debounceCheck
             try {
-                // BUG FIX: was `?: return@debounceCheck` inside try-finally block.
-                // return@label inside try-finally in a non-inline suspend lambda is a compile error.
-                // Fix: use null check with if-else instead.
                 val url = getUrlBarText(root)?.lowercase()
-                if (url != null && BLOCKED_KEYWORDS.any { url.contains(it) }) {
+                // BUG FIX #2: containsBlockedKeyword() — word boundary সহ
+                if (url != null && containsBlockedKeyword(url) != null) {
                     withContext(Dispatchers.Main) { triggerBlock("ব্লক করা সাইট: $url") }
                 }
             } finally { root.recycle() }
@@ -263,12 +273,12 @@ class BlockerAccessibilityService : AccessibilityService() {
     private fun handleWindowTextEvent(event: AccessibilityEvent) {
         if (event.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED &&
             event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
-        // BUG FIX: dedicated windowDebounceJob — avoids cancelling browser URL debounce
         debounceWindowCheck {
-            val root = rootInActiveWindow ?: return@debounceWindowCheck  // BUG FIX: was return@debounceCheck → unresolved after rename
+            val root = rootInActiveWindow ?: return@debounceWindowCheck
             try {
                 val text = collectAllText(root).lowercase()
-                val hit = BLOCKED_KEYWORDS.firstOrNull { text.contains(it) }
+                // BUG FIX #2: containsBlockedKeyword() — word boundary সহ
+                val hit = containsBlockedKeyword(text)
                 if (hit != null) {
                     withContext(Dispatchers.Main) { triggerBlock("ব্লক করা কন্টেন্ট: $hit") }
                 }
@@ -276,7 +286,23 @@ class BlockerAccessibilityService : AccessibilityService() {
         }
     }
 
-    // ── Debounce helper ───────────────────────────────────────────────
+    // ── BUG FIX #2: Word-boundary keyword match helper ────────────────
+    // Regex (?<![a-zA-Z])keyword(?![a-zA-Z]) মানে:
+    //   • keyword এর আগে কোনো letter নেই
+    //   • keyword এর পরে কোনো letter নেই
+    //
+    // "class"     → "ass" এর আগে 'l' আছে     → NO MATCH ✓
+    // "classroom" → "ass" এর আগে 'l' আছে     → NO MATCH ✓
+    // "assassin"  → "ass" এর পরে 'a' আছে     → NO MATCH ✓
+    // "passenger" → "ass" এর আগে 'p' আছে     → NO MATCH ✓
+    // "your ass"  → "ass" এর আগে ' '          → MATCH    ✓
+    // "ass."      → "ass" এর পরে '.'          → MATCH    ✓
+    // "cockpit"   → "cock" এর পরে 'p' আছে    → NO MATCH ✓
+    // ──────────────────────────────────────────────────────────────────
+    private fun containsBlockedKeyword(text: String): String? =
+        BLOCKED_KEYWORD_REGEXES.firstOrNull { (_, rx) -> rx.containsMatchIn(text) }?.first
+
+    // ── Debounce helpers ──────────────────────────────────────────────
 
     private fun debounceCheck(block: suspend CoroutineScope.() -> Unit) {
         urlDebounceJob?.cancel()
@@ -287,7 +313,6 @@ class BlockerAccessibilityService : AccessibilityService() {
         }
     }
 
-    // BUG FIX: separate debounce for window-text events so they don't cancel URL debounce
     private fun debounceWindowCheck(block: suspend CoroutineScope.() -> Unit) {
         windowDebounceJob?.cancel()
         windowDebounceJob = serviceScope.launch {
@@ -346,8 +371,6 @@ class BlockerAccessibilityService : AccessibilityService() {
     // ── Receiver registration ─────────────────────────────────────────
 
     private fun registerReceivers() {
-        // BUG FIX: `val flags` was declared here but never used — dead code removed
-
         fun reg(receiver: BroadcastReceiver, action: String) {
             try {
                 val f = IntentFilter(action)
