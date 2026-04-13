@@ -27,23 +27,26 @@ object FalsePositiveDB {
     /** User "❌ ভুল (False Positive)" চাপলে */
     fun addFalse(ctx: Context, hash: Long) {
         if (hash == 0L) return
-        val set = getFalseHashes(ctx).toMutableSet()
+        // BUG FIX: was getFalseHashes(ctx).toMutableSet() → Set<Long>.toMutableSet() = MutableSet<Long>
+        // set.add(hash.toString()) → String into MutableSet<Long> = TYPE MISMATCH (compile error)
+        // save(ctx, KEY_FALSE, set) → MutableSet<Long> as Set<String> = TYPE MISMATCH (compile error)
+        // Fix: read raw String set from prefs directly
+        val set = prefs(ctx).getStringSet(KEY_FALSE, emptySet())?.toMutableSet() ?: mutableSetOf()
         set.add(hash.toString())
         if (set.size > MAX_SIZE) {
-            // পুরনো entry সরাও
             val trimmed = set.toList().takeLast(MAX_SIZE).toMutableSet()
             save(ctx, KEY_FALSE, trimmed)
         } else {
             save(ctx, KEY_FALSE, set)
         }
-        // যদি true DB-তে থাকে সরাও
         removeFromTrue(ctx, hash)
     }
 
     /** User "✅ সঠিক" চাপলে */
     fun addTrue(ctx: Context, hash: Long) {
         if (hash == 0L) return
-        val set = getTrueHashes(ctx).toMutableSet()
+        // BUG FIX: same type mismatch as addFalse — use raw String set from prefs
+        val set = prefs(ctx).getStringSet(KEY_TRUE, emptySet())?.toMutableSet() ?: mutableSetOf()
         set.add(hash.toString())
         if (set.size > MAX_SIZE) {
             val trimmed = set.toList().takeLast(MAX_SIZE).toMutableSet()
@@ -51,7 +54,6 @@ object FalsePositiveDB {
         } else {
             save(ctx, KEY_TRUE, set)
         }
-        // যদি false DB-তে থাকে সরাও
         removeFromFalse(ctx, hash)
     }
 

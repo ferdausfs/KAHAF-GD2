@@ -55,14 +55,15 @@ class ContentClassifier(private val context: Context) {
             false
         } else {
             val buf = loadMapped(file)
-            // ⚠️ BUG FIX: useXNNPACK is Java-only setter (no getter) in TFLite 2.14.0.
-            // Kotlin property assignment (useXNNPACK = true) requires both getter + setter.
-            // Fix: call setUseXNNPACK(true) directly, or omit (XNNPACK is on by default).
             val options = Interpreter.Options().apply {
                 numThreads = 2
-                setUseXNNPACK(true)   // ← correct way to call Java-only setter in Kotlin
+                setUseXNNPACK(true)
             }
-            interpreter = Interpreter(buf, options)
+            // BUG FIX: interpreter assignment was outside synchronized block —
+            // concurrent close() call could race with this write → data race
+            synchronized(this) {
+                interpreter = Interpreter(buf, options)
+            }
             true
         }
     } catch (e: Exception) {
@@ -94,19 +95,16 @@ class ContentClassifier(private val context: Context) {
         return try {
             val input  = bitmapToBuffer(bitmap)
 
-            // FIX: Detect output shape dynamically — don't assume [1][2].
-            // GantMan mobilenet_v2_140_224 → [1,2]: [safe, unsafe]
-            // GantMan inception_v3         → [1,5]: [drawings, hentai, neutral, porn, sexy]
-            // Code now handles both automatically.
-            val outputTensor = synchronized(this) {
-                interpreter?.getOutputTensor(0)
-            } ?: return Result(1f, 0f, false, "Model লোড হয়নি")
-
-            val outputSize = outputTensor.shape()[1]  // e.g. 2 or 5
-            val output = Array(1) { FloatArray(outputSize) }
-
+            // BUG FIX: was two separate synchronized blocks with outputTensor.shape()[1]
+            // called OUTSIDE — interpreter could be closed between the two blocks,
+            // making outputTensor stale. Now: get shape and run inside one synchronized block.
+            val outputSize: Int
+            val output: Array<FloatArray>
             val ran = synchronized(this) {
                 val interp = interpreter ?: return Result(1f, 0f, false, "Model লোড হয়নি")
+                val shape = interp.getOutputTensor(0).shape()
+                outputSize = shape[1]
+                output = Array(1) { FloatArray(outputSize) }
                 interp.run(input, output)
                 true
             }
@@ -152,7 +150,8 @@ class ContentClassifier(private val context: Context) {
         }
     }
 
-    fun isLoaded(): Boolean = interpreter != null
+    // BUG FIX: was `interpreter != null` without synchronized — data race with close()
+    fun isLoaded(): Boolean = synchronized(this) { interpreter != null }
 
     fun close() {
         synchronized(this) {

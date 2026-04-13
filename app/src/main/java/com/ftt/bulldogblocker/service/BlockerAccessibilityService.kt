@@ -54,10 +54,14 @@ class BlockerAccessibilityService : AccessibilityService() {
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
     @Volatile private var classifier: ContentClassifier? = null
-    private var classifierLoaded = false
+    // BUG FIX: @Volatile missing — written by broadcast receiver (main thread),
+    // read/written in loadClassifier() coroutine (Dispatchers.Default) → data race
+    @Volatile private var classifierLoaded = false
 
     // Held as Any? — zero compile-time API-30 type references in THIS file.
-    private var screenshotBlocker: Any? = null
+    // BUG FIX: @Volatile missing — written on Dispatchers.Default (startScreenshotBlocker),
+    // read on main thread (triggerBlock, onDestroy) → data race
+    @Volatile private var screenshotBlocker: Any? = null
 
     @Volatile private var lastBlockTime     = 0L
     @Volatile private var lastUninstallTime = 0L
@@ -202,6 +206,10 @@ class BlockerAccessibilityService : AccessibilityService() {
     // ── Uninstall protection ──────────────────────────────────────────
 
     private fun handleUninstallViaInstaller(event: AccessibilityEvent) {
+        // BUG FIX: no event type filter — was scanning full accessibility tree on EVERY event
+        // (scrolls, clicks, focus changes) from installer apps. Very expensive.
+        if (event.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED &&
+            event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         val root = rootInActiveWindow ?: return
         try {
             val text = collectAllText(root).lowercase()
@@ -210,6 +218,9 @@ class BlockerAccessibilityService : AccessibilityService() {
     }
 
     private fun handleUninstallViaSettings(event: AccessibilityEvent) {
+        // BUG FIX: same missing event type filter as handleUninstallViaInstaller
+        if (event.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED &&
+            event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         val root = rootInActiveWindow ?: return
         try {
             val t = collectAllText(root).lowercase()
@@ -236,8 +247,11 @@ class BlockerAccessibilityService : AccessibilityService() {
         debounceCheck {
             val root = rootInActiveWindow ?: return@debounceCheck
             try {
-                val url = getUrlBarText(root)?.lowercase() ?: return@debounceCheck
-                if (BLOCKED_KEYWORDS.any { url.contains(it) }) {
+                // BUG FIX: was `?: return@debounceCheck` inside try-finally block.
+                // return@label inside try-finally in a non-inline suspend lambda is a compile error.
+                // Fix: use null check with if-else instead.
+                val url = getUrlBarText(root)?.lowercase()
+                if (url != null && BLOCKED_KEYWORDS.any { url.contains(it) }) {
                     withContext(Dispatchers.Main) { triggerBlock("ব্লক করা সাইট: $url") }
                 }
             } finally { root.recycle() }
@@ -251,7 +265,7 @@ class BlockerAccessibilityService : AccessibilityService() {
             event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         // BUG FIX: dedicated windowDebounceJob — avoids cancelling browser URL debounce
         debounceWindowCheck {
-            val root = rootInActiveWindow ?: return@debounceCheck
+            val root = rootInActiveWindow ?: return@debounceWindowCheck  // BUG FIX: was return@debounceCheck → unresolved after rename
             try {
                 val text = collectAllText(root).lowercase()
                 val hit = BLOCKED_KEYWORDS.firstOrNull { text.contains(it) }
@@ -332,8 +346,7 @@ class BlockerAccessibilityService : AccessibilityService() {
     // ── Receiver registration ─────────────────────────────────────────
 
     private fun registerReceivers() {
-        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
-            RECEIVER_NOT_EXPORTED else 0
+        // BUG FIX: `val flags` was declared here but never used — dead code removed
 
         fun reg(receiver: BroadcastReceiver, action: String) {
             try {
