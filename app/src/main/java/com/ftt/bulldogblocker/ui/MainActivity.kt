@@ -493,7 +493,7 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             // BUG FIX: hardcoded "22%" এর বদলে ThresholdManager থেকে পড়া হচ্ছে
             val ssThresholdPct = (ThresholdManager.getScreenshot(this) * 100).toInt()
-            tvMlScanStatus.text = "📸 Auto ML Scan: চালু (প্রতি 300ms, threshold ${ssThresholdPct}%)"
+            tvMlScanStatus.text = "📸 Auto ML Scan: চালু (প্রতি 1500ms, threshold ${ssThresholdPct}%)"
             tvMlScanStatus.setTextColor(Color.parseColor("#4CAF50"))
         } else {
             tvMlScanStatus.text = "⚠️ Auto ML Scan: Android 11+ লাগবে (আপনার Android ${Build.VERSION.RELEASE})"

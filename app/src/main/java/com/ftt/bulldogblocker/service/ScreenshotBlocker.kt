@@ -13,29 +13,35 @@ import com.ftt.bulldogblocker.ml.FalsePositiveDB
 import com.ftt.bulldogblocker.ml.ImageHashUtil
 import kotlinx.coroutines.*
 
-/**
- * ⚠️ IMPORTANT: This class is in a SEPARATE file on purpose.
- * See BlockerAccessibilityService for explanation.
- */
 @RequiresApi(Build.VERSION_CODES.R)
 class ScreenshotBlocker(
     private val service: AccessibilityService,
     private val scope: CoroutineScope,
-    // BUG FIX #1: Whitelist check lambda — BlockerAccessibilityService থেকে আসে।
-    // Foreground app whitelisted হলে screenshot নেওয়াই হয় না।
-    // Default: { false } → backward compat (না পাঠালে সব block হয়)
     private val isForegroundPkgWhitelisted: () -> Boolean = { false },
     // reason, imageHash, unsafeScore, showReportButtons
     private val onAdultDetected: (String, Long, Float, Boolean) -> Unit
 ) {
     companion object {
         private const val TAG = "BDB_Screenshot"
-        private const val INTERVAL_MS  = 300L
 
-        private const val COOLDOWN_MS     = 3_000L
-        private const val BUSY_TIMEOUT    = 4_000L
+        // v7 BUG FIX #4: 300ms → 1500ms
+        // আগে: প্রতি 300ms screenshot = প্রতি সেকেন্ডে ৩টা ML inference।
+        //       ফলে: ৩টা screenshot → ৩টা report → threshold পার → block screen।
+        //       পুরোটা ৯০০ms-এর মধ্যে — user popup দেখার সময়ই পায় না।
+        // এখন: ১৫০০ms ব্যবধানে → user ৪-৫ সেকেন্ড popup দেখার সময় পাবে।
+        // Battery drain ও কমবে (৩x কম screenshot = ৩x কম ML inference)।
+        private const val INTERVAL_MS  = 1_500L
+
+        // v7 FIX: Cooldown বাড়ানো হয়েছে — popup দেখার পর্যাপ্ত সময়।
+        private const val COOLDOWN_MS  = 5_000L
+        private const val BUSY_TIMEOUT = 4_000L
 
         const val REPORT_THRESHOLD = 0.85f
+
+        // v7 BUG FIX #5: Uniform color variance threshold।
+        // Mostly-black ছাড়াও সাদা/solid color screen skip করতে হবে।
+        // Variance < 150 = সব pixel প্রায় একই রঙ = loading screen / splash / solid UI।
+        private const val UNIFORM_VARIANCE_THRESHOLD = 150f
     }
 
     @Volatile private var busy          = false
@@ -53,13 +59,8 @@ class ScreenshotBlocker(
                 val now = System.currentTimeMillis()
                 if (now - lastBlock < COOLDOWN_MS) continue
 
-                // BUG FIX #1: Whitelisted app-এ screenshot নেওয়া বন্ধ করো
-                // এই lambda BlockerAccessibilityService থেকে আসে এবং
-                // currentForegroundPkg ∈ whitelistCache কিনা check করে।
-                // আগে: whitelist করা app খোলা থাকলেও ML loop চলতো → block হতো
-                // এখন: whitelisted হলে পুরো iteration skip
                 if (isForegroundPkgWhitelisted()) {
-                    Log.d(TAG, "Skip — foreground app is whitelisted")
+                    Log.d(TAG, "Skip — foreground app is whitelisted or our own package")
                     continue
                 }
 
@@ -72,7 +73,7 @@ class ScreenshotBlocker(
                 capture()
             }
         }
-        Log.d(TAG, "Screenshot loop started — interval=${INTERVAL_MS}ms, threshold=dynamic(ThresholdManager)")
+        Log.d(TAG, "Screenshot loop started — interval=${INTERVAL_MS}ms")
     }
 
     fun updateClassifier(c: ContentClassifier) { classifier = c }
@@ -132,7 +133,10 @@ class ScreenshotBlocker(
                     Bitmap.createBitmap(full, 0, topCut, w, cropH)
                 } else full
 
-                if (isMostlyBlack(cropped)) {
+                // v7 BUG FIX #5: shouldSkipFrame() — black + uniform color check।
+                // আগে: শুধু isMostlyBlack() → সাদা/solid color screen ML-এ যেত → false positive।
+                // এখন: pixel variance দিয়ে solid color detect করে skip করা হয়।
+                if (shouldSkipFrame(cropped)) {
                     return@launch
                 }
 
@@ -147,8 +151,8 @@ class ScreenshotBlocker(
                     return@launch
                 }
 
-                val threshold     = ThresholdManager.getScreenshot(ctx)
-                val sexyAlone     = ThresholdManager.getSexyAlone(ctx)
+                val threshold = ThresholdManager.getScreenshot(ctx)
+                val sexyAlone = ThresholdManager.getSexyAlone(ctx)
                 val res = c.classifyWithThreshold(cropped, threshold, sexyAlone)
 
                 if (res.isAdult) {
@@ -156,8 +160,8 @@ class ScreenshotBlocker(
                     Log.w(TAG, "Adult detected: unsafe=${score} (threshold=$threshold, hash=$hash)")
                     lastBlock = System.currentTimeMillis()
 
-                    val isConfirmed  = FalsePositiveDB.isConfirmedTrue(ctx, hash)
-                    val showReport   = score < REPORT_THRESHOLD && !isConfirmed
+                    val isConfirmed = FalsePositiveDB.isConfirmedTrue(ctx, hash)
+                    val showReport  = score < REPORT_THRESHOLD && !isConfirmed
 
                     withContext(Dispatchers.Main) {
                         onAdultDetected(
@@ -179,21 +183,55 @@ class ScreenshotBlocker(
         }
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────
+    // ── Frame skip logic ──────────────────────────────────────────────
 
-    private fun isMostlyBlack(bmp: Bitmap): Boolean {
+    /**
+     * v7 BUG FIX #5: shouldSkipFrame() — isMostlyBlack() replacement।
+     *
+     * দুইটা condition-এ frame skip করা হয়:
+     *   1. Mostly black  (avg brightness < 15) — screen off / dark overlay
+     *   2. Uniform color (variance < threshold) — white loading screen / splash / solid UI
+     *
+     * Optimized: single-pass mean+variance calculation (Welford's online algorithm)।
+     * আগে ৩টা FloatArray allocate + ৩টা loop → এখন কোনো extra allocation নেই।
+     */
+    private fun shouldSkipFrame(bmp: Bitmap): Boolean {
         val sample = Bitmap.createScaledBitmap(bmp, 32, 32, false)
-        var totalBrightness = 0L
         val pixels = IntArray(32 * 32)
         sample.getPixels(pixels, 0, 32, 0, 0, 32, 32)
         if (sample !== bmp) sample.recycle()
-        for (p in pixels) {
-            val r = (p shr 16) and 0xFF
-            val g = (p shr 8)  and 0xFF
-            val b =  p         and 0xFF
-            totalBrightness += (r + g + b)
+
+        // Single-pass: compute brightness avg + variance for R,G,B simultaneously
+        // Using Welford's online algorithm — no extra FloatArray allocations
+        var rMean = 0.0; var rM2 = 0.0
+        var gMean = 0.0; var gM2 = 0.0
+        var bMean = 0.0; var bM2 = 0.0
+        var totalBrightness = 0L
+
+        for (i in pixels.indices) {
+            val p  = pixels[i]
+            val r  = ((p shr 16) and 0xFF).toDouble()
+            val g  = ((p shr 8)  and 0xFF).toDouble()
+            val b  = ( p         and 0xFF).toDouble()
+            totalBrightness += (r + g + b).toLong()
+
+            val n  = (i + 1).toDouble()
+            val dr = r - rMean; rMean += dr / n; rM2 += dr * (r - rMean)
+            val dg = g - gMean; gMean += dg / n; gM2 += dg * (g - gMean)
+            val db = b - bMean; bMean += db / n; bM2 += db * (b - bMean)
         }
+
+        // Check 1: mostly black
         val avg = totalBrightness / (pixels.size * 3)
-        return avg < 15
+        if (avg < 15) return true
+
+        // Check 2: uniform color (variance of all 3 channels combined)
+        val totalVariance = ((rM2 + gM2 + bM2) / pixels.size).toFloat()
+        if (totalVariance < UNIFORM_VARIANCE_THRESHOLD) {
+            Log.d(TAG, "Skip — uniform color frame (variance=${"%.1f".format(totalVariance)})")
+            return true
+        }
+
+        return false
     }
 }

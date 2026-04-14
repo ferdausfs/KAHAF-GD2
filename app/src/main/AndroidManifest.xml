@@ -14,14 +14,6 @@
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
-    <!-- FIX: Custom signature-level permission for internal restart broadcast.
-         RECEIVE_BOOT_COMPLETED is a normal permission any app can hold.
-         This custom permission ensures ONLY our own app can send RESTART_SERVICE. -->
-    <uses-permission android:name="com.ftt.bulldogblocker.RESTART_PERMISSION" />
-
-    <permission
-        android:name="com.ftt.bulldogblocker.RESTART_PERMISSION"
-        android:protectionLevel="signature" />
 
     <application
         android:allowBackup="false"
@@ -88,10 +80,18 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <!--
+            v7 BUG FIX: android:permission সরানো হয়েছে।
+            আগে: android:permission="com.ftt.bulldogblocker.RESTART_PERMISSION" থাকায়
+                 Android system BOOT_COMPLETED পাঠাতে পারত না — system ওই permission hold করে না।
+                 ফলে phone restart-এ app কখনো auto-start হতো না।
+            এখন: permission ছাড়া receiver → system BOOT_COMPLETED deliver করতে পারে।
+                 RESTART_SERVICE: explicit Intent (component specified) দিয়ে পাঠানো হয়,
+                 তাই অন্য app implicit broadcast দিয়ে target করতে পারে না।
+        -->
         <receiver
             android:name=".receiver.BootReceiver"
-            android:exported="true"
-            android:permission="com.ftt.bulldogblocker.RESTART_PERMISSION">
+            android:exported="true">
             <intent-filter android:priority="999">
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />

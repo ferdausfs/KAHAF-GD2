@@ -6,7 +6,6 @@ import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -51,10 +50,8 @@ class ReportOverlayManager(private val context: Context) {
             val view = buildView(reportCount, maxReports)
             currentView = view
 
-            val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
-            else
-                @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
+            // minSdk = 26 (O) → TYPE_ACCESSIBILITY_OVERLAY always available; TYPE_PHONE dead code removed
+            val type = WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
 
             val flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or

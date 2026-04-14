@@ -124,15 +124,16 @@ class ContentClassifier(private val context: Context) {
         sexyAloneThreshold: Float = ThresholdManager.DEFAULT_SEXY_ALONE
     ): Result {
         return try {
-            val input = bitmapToBuffer(bitmap)
-
+            // inputBuf/pixelBuf are instance fields — bitmapToBuffer() must be inside
+            // synchronized(this) to prevent race between MainActivity test and ScreenshotBlocker
             val outputSize: Int
             val output: Array<FloatArray>
             val ran = synchronized(this) {
                 val interp = interpreter ?: return Result(1f, 0f, false, "Model লোড হয়নি")
-                val shape = interp.getOutputTensor(0).shape()
+                val input  = bitmapToBuffer(bitmap)   // safe: inside lock
+                val shape  = interp.getOutputTensor(0).shape()
                 outputSize = shape[1]
-                output = Array(1) { FloatArray(outputSize) }
+                output     = Array(1) { FloatArray(outputSize) }
                 interp.run(input, output)
                 true
             }
@@ -229,25 +230,27 @@ class ContentClassifier(private val context: Context) {
 
     // ─── Helpers ────────────────────────────────────────────────────
 
+    // Pre-allocated buffers — reused across classify calls (access protected by synchronized block)
+    private val pixelBuf   = IntArray(INPUT_SIZE * INPUT_SIZE)
+    private val inputBuf   = ByteBuffer
+        .allocateDirect(1 * INPUT_SIZE * INPUT_SIZE * 3 * 4)
+        .apply { order(ByteOrder.nativeOrder()) }
+
     private fun bitmapToBuffer(src: Bitmap): ByteBuffer {
         val bmp = Bitmap.createScaledBitmap(src, INPUT_SIZE, INPUT_SIZE, true)
 
-        val buf = ByteBuffer
-            .allocateDirect(1 * INPUT_SIZE * INPUT_SIZE * 3 * 4)
-            .apply { order(ByteOrder.nativeOrder()) }
-
-        val pix = IntArray(INPUT_SIZE * INPUT_SIZE)
-        bmp.getPixels(pix, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE)
+        inputBuf.rewind()
+        bmp.getPixels(pixelBuf, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE)
 
         if (bmp !== src) bmp.recycle()
 
-        for (p in pix) {
-            buf.putFloat(((p shr 16) and 0xFF) / 255f) // R
-            buf.putFloat(((p shr 8)  and 0xFF) / 255f) // G
-            buf.putFloat( (p         and 0xFF) / 255f) // B
+        for (p in pixelBuf) {
+            inputBuf.putFloat(((p shr 16) and 0xFF) / 255f) // R
+            inputBuf.putFloat(((p shr 8)  and 0xFF) / 255f) // G
+            inputBuf.putFloat( (p         and 0xFF) / 255f) // B
         }
-        buf.rewind()
-        return buf
+        inputBuf.rewind()
+        return inputBuf
     }
 
     private fun loadMapped(f: File): MappedByteBuffer {

@@ -44,11 +44,13 @@ object AppReportManager {
 
     /** Report যোগ করো, নতুন count return করো */
     fun addReport(ctx: Context, pkg: String): Int {
-        if (checkAndClearExpiredBlock(ctx, pkg)) return 1.also {
-            prefs(ctx).edit().putInt(countKey(pkg), 1).apply()
+        val p = prefs(ctx)
+        if (checkAndClearExpiredBlock(ctx, pkg)) {
+            p.edit().putInt(countKey(pkg), 1).apply()
+            return 1
         }
-        val n = prefs(ctx).getInt(countKey(pkg), 0) + 1
-        prefs(ctx).edit().putInt(countKey(pkg), n).apply()
+        val n = p.getInt(countKey(pkg), 0) + 1
+        p.edit().putInt(countKey(pkg), n).apply()
         return n
     }
 

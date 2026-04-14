@@ -54,15 +54,24 @@ class BlockerForegroundService : Service() {
     override fun onDestroy() {
         serviceScope.cancel()
         super.onDestroy()
-        // FIX: Use explicit Intent with component — setClass sets the component correctly.
-        // Previously the action string and setClass were redundant; keep setClass only.
+        // FIX: Android 12+ (API 31+) restricts startForegroundService() from background.
+        // Strategy: try direct startForegroundService() first — if we're still in the allowed
+        // window (service just dying), it works. Fallback to broadcast for older API.
         try {
-            val restartIntent = Intent(this, BootReceiver::class.java).apply {
-                action = "com.ftt.bulldogblocker.RESTART_SERVICE"
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(Intent(this, BlockerForegroundService::class.java))
+            } else {
+                startService(Intent(this, BlockerForegroundService::class.java))
             }
-            sendBroadcast(restartIntent)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to send restart broadcast", e)
+            Log.w(TAG, "Direct restart failed, falling back to broadcast: ${e.message}")
+            try {
+                sendBroadcast(Intent(this, BootReceiver::class.java).apply {
+                    action = "com.ftt.bulldogblocker.RESTART_SERVICE"
+                })
+            } catch (ex: Exception) {
+                Log.e(TAG, "Broadcast restart also failed", ex)
+            }
         }
     }
 

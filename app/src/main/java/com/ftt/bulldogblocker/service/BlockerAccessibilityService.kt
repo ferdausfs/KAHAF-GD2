@@ -40,6 +40,48 @@ class BlockerAccessibilityService : AccessibilityService() {
             "com.miui.packageinstaller"
         )
 
+        private val SYSTEM_UI_PACKAGES = setOf(
+            "android",
+            "com.android.systemui",
+            // Google keyboards
+            "com.google.android.inputmethod.latin",
+            "com.google.android.inputmethod.pinyin",
+            // Samsung keyboards
+            "com.samsung.android.honeyboard",
+            "com.sec.android.inputmethod",
+            // Third-party keyboards
+            "com.touchtype.swiftkey",
+            "com.swiftkey.swiftkeyapp",
+            "com.nuance.swype.dtc",
+            "com.nuance.swype.trial",
+            // LG keyboard
+            "com.lge.ime",
+            "com.lg.lgime",
+            // MIUI system
+            "com.miui.msa.global",
+            "com.miui.systemAdSolution",
+            // Generic
+            "com.android.settings.intelligence"
+        )
+
+        // Prefix-based system UI detection — catches sub-packages not in the set above
+        // (e.g. com.android.systemui.overlay, com.android.systemui.recents, etc.)
+        private val SYSTEM_UI_PREFIXES = arrayOf(
+            "com.android.systemui.",
+            "com.samsung.android.app.taskbar",
+            "com.oneplus.",
+            "com.nothing.launcher"
+        )
+
+        /** Returns true if pkg is a system UI / keyboard / launcher package to be ignored */
+        fun isSystemUiPackage(pkg: String): Boolean {
+            if (pkg in SYSTEM_UI_PACKAGES) return true
+            for (prefix in SYSTEM_UI_PREFIXES) {
+                if (pkg.startsWith(prefix)) return true
+            }
+            return false
+        }
+
         const val ACTION_RELOAD_MODEL = "com.ftt.bulldogblocker.RELOAD_MODEL"
 
         private val BLOCKED_KEYWORDS = listOf(
@@ -50,7 +92,6 @@ class BlockerAccessibilityService : AccessibilityService() {
             "penis","naked","strip","lingerie","bikini model","hot girls"
         )
 
-        // Word-boundary regex — substring match এড়াতে
         private val BLOCKED_KEYWORD_REGEXES: List<Pair<String, Regex>> by lazy {
             BLOCKED_KEYWORDS.map { kw ->
                 kw to Regex("(?i)(?<![a-zA-Z])${Regex.escape(kw)}(?![a-zA-Z])")
@@ -72,10 +113,9 @@ class BlockerAccessibilityService : AccessibilityService() {
     @Volatile private var blacklistCache: Set<String> = emptySet()
     @Volatile private var whitelistCache: Set<String> = emptySet()
 
-    // Foreground package tracker — ScreenshotBlocker & report system-এর জন্য
+    // v7 FIX #2: currentForegroundPkg শুধু real user app-এ update হবে (keyboard/SystemUI বাদে)
     @Volatile private var currentForegroundPkg: String = ""
 
-    // ── Report Overlay ────────────────────────────────────────────────
     private var reportOverlay: ReportOverlayManager? = null
 
     // ── Receivers ────────────────────────────────────────────────────
@@ -113,26 +153,27 @@ class BlockerAccessibilityService : AccessibilityService() {
         event ?: return
         val pkg = event.packageName?.toString() ?: return
 
-        // Track foreground package for ScreenshotBlocker + report system
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            currentForegroundPkg = pkg
 
-            // ── Blocked app enforcement ──────────────────────────────
-            // যদি blocked app খোলার চেষ্টা হয় → block screen দেখাও
+            // v7 BUG FIX #2: currentForegroundPkg শুধু real app-এ update হবে।
+            // System UI, keyboard, notification bar — এগুলো foreground tracker আপডেট করবে না।
+            // কারণ: keyboard খুললে পুরো block loop whitelist check ভেঙে যেত।
+            if (!isSystemUiPackage(pkg)) {
+                currentForegroundPkg = pkg
+            }
+
+            // Blocked app enforcement
             if (pkg != OUR_PACKAGE && pkg !in whitelistCache &&
                 AppReportManager.isBlocked(applicationContext, pkg)) {
                 val remMs  = AppReportManager.getBlockRemainingMs(applicationContext, pkg)
                 val remMin = (remMs / 60_000L + 1L).toInt()
                 serviceScope.launch(Dispatchers.Main) {
-                    // BUG FIX: countReport parameter triggerBlockScreen() থেকে সরানো হয়েছে।
-                    // এই call-এ শুধু reason — কোনো extra param নেই।
                     triggerBlockScreen(reason = "⏳ App ব্লক — আর $remMin মিনিট বাকি")
                 }
                 return
             }
         }
 
-        // Whitelist → সব skip
         if (pkg in whitelistCache) return
 
         when {
@@ -196,17 +237,25 @@ class BlockerAccessibilityService : AccessibilityService() {
         if (existing != null) { existing.updateClassifier(c); return }
 
         val blocker = ScreenshotBlocker(
-            service                    = this,
-            scope                      = serviceScope,
-            isForegroundPkgWhitelisted = { whitelistCache.contains(currentForegroundPkg) },
-            onAdultDetected            = { reason, hash, score, showReport ->
+            service = this,
+            scope   = serviceScope,
+            // v7 BUG FIX #2 + #3:
+            // Whitelist check-এ OUR_PACKAGE যোগ করা হয়েছে।
+            // কারণ: BlockScreenActivity খোলা থাকলে currentForegroundPkg = "com.ftt.bulldogblocker"।
+            // তখন ML scan চলতে থাকলে BlockScreen-এর screenshot analyze হয় → self-block loop।
+            // Fix: foreground = OUR_PACKAGE হলে scan skip করো।
+            isForegroundPkgWhitelisted = {
+                whitelistCache.contains(currentForegroundPkg) ||
+                currentForegroundPkg == OUR_PACKAGE
+            },
+            onAdultDetected = { reason, hash, score, showReport ->
                 serviceScope.launch(Dispatchers.Main) {
                     triggerBlock(
-                        reason      = reason,
-                        hash        = hash,
-                        score       = score,
-                        showReport  = showReport,
-                        pkg         = currentForegroundPkg
+                        reason     = reason,
+                        hash       = hash,
+                        score      = score,
+                        showReport = showReport,
+                        pkg        = currentForegroundPkg
                     )
                 }
             }
@@ -215,16 +264,8 @@ class BlockerAccessibilityService : AccessibilityService() {
         screenshotBlocker = blocker
     }
 
-    // ── Block trigger — CORE LOGIC ────────────────────────────────────
+    // ── Block trigger ─────────────────────────────────────────────────
 
-    /**
-     * Content detect হলে এই function ডাকা হয়।
-     *
-     * @param pkg          যে app-এ content পাওয়া গেছে (null = browser/unknown)
-     * @param countReport  false হলে report counter বাড়ানো হবে না।
-     *                     Browser events-এ false pass করা হয় কারণ Chrome/Firefox-কে
-     *                     app হিসেবে block করা উচিত নয়।
-     */
     private fun triggerBlock(
         reason:      String,
         hash:        Long    = 0L,
@@ -233,32 +274,28 @@ class BlockerAccessibilityService : AccessibilityService() {
         pkg:         String? = null,
         countReport: Boolean = true
     ) {
-        // BUG FIX #2: lastBlockTime এখন শুধু BlockScreenActivity দেখালে set হয়।
-        // আগে triggerBlock()-এর শুরুতেই set হতো → overlay দেখালেও ৩ সেকেন্ড blocked।
-        // এখন overlay শুধু overlay — cooldown নেই।
-        val now = System.currentTimeMillis()
+        // v7 BUG FIX #3: নিজের package কখনো block করা যাবে না।
+        // আগে: pkg == OUR_PACKAGE হলে countReport block skip হতো,
+        //       কিন্তু সরাসরি direct-block path-এ পড়ে যেত → BulldogBlocker নিজেকে block করত।
+        // Fix: সবার আগে OUR_PACKAGE check করো → return।
+        if (pkg == OUR_PACKAGE) return
 
+        val now = System.currentTimeMillis()
         val ctx = applicationContext
 
-        // ── Report counter logic ──────────────────────────────────────
-        if (countReport && pkg != null && pkg != OUR_PACKAGE && pkg.isNotEmpty()) {
+        if (countReport && pkg != null && pkg.isNotEmpty()) {
 
             val count     = AppReportManager.addReport(ctx, pkg)
             val threshold = AppReportManager.getReportThreshold(ctx)
 
             if (count < threshold) {
-                // Warning overlay — no full block, no cooldown
                 Log.d(TAG, "Report $count/$threshold for $pkg")
                 (screenshotBlocker as? ScreenshotBlocker)?.resetCooldown()
                 reportOverlay?.show(count, threshold)
-                return   // ← no BlockScreenActivity, no cooldown update
+                return
             } else {
-                // BUG FIX #2: cooldown check এখন addReport()-এর পরে আছে।
-                // আগে: addReport() → count>=threshold → cooldown active → return (blockApp ডাকা হয়নি)
-                //       কিন্তু count ইতিমধ্যে বেড়ে গেছে → পরের call-এ আরও বাড়বে → overshoot।
-                // Fix: cooldown active থাকলেও blockApp() ডাকো — block টা persistent তাই double-call নিরাপদ।
                 if (now - lastBlockTime < BLOCK_COOLDOWN) {
-                    AppReportManager.blockApp(ctx, pkg)   // idempotent — বারবার call করা নিরাপদ
+                    AppReportManager.blockApp(ctx, pkg)
                     return
                 }
                 lastBlockTime = now
@@ -270,13 +307,12 @@ class BlockerAccessibilityService : AccessibilityService() {
             }
         }
 
-        // ── Direct block (countReport=false বা browser) ───────────────
+        // Direct block (countReport=false or browser)
         if (now - lastBlockTime < BLOCK_COOLDOWN) return
         lastBlockTime = now
         triggerBlockScreen(reason = reason, hash = hash, score = score, showReport = showReport)
     }
 
-    // BUG FIX #4: countReport parameter সরানো হয়েছে — unused ছিল।
     private fun triggerBlockScreen(
         reason:     String,
         hash:       Long    = 0L,
@@ -340,9 +376,6 @@ class BlockerAccessibilityService : AccessibilityService() {
                 val url = getUrlBarText(root)?.lowercase()
                 if (url != null && containsBlockedKeyword(url) != null) {
                     withContext(Dispatchers.Main) {
-                        // BUG FIX #3: countReport=false — browser app (Chrome/Firefox) কে
-                        // block করা উচিত নয়, শুধু সেই navigation/URL block হবে।
-                        // আগে countReport=true ছিল → ৩ বার bad URL = Chrome নিজেই blocked!
                         triggerBlock("ব্লক করা সাইট: $url", pkg = pkg, countReport = false)
                     }
                 }
@@ -369,7 +402,7 @@ class BlockerAccessibilityService : AccessibilityService() {
         }
     }
 
-    // ── Keyword match (word-boundary) ─────────────────────────────────
+    // ── Keyword match ─────────────────────────────────────────────────
 
     private fun containsBlockedKeyword(text: String): String? =
         BLOCKED_KEYWORD_REGEXES.firstOrNull { (_, rx) -> rx.containsMatchIn(text) }?.first
