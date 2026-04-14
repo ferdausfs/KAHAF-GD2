@@ -183,6 +183,13 @@ class ScreenshotBlocker(
                     Log.w(TAG, "Adult detected: unsafe=${score} (threshold=$threshold, hash=$hash)")
                     lastBlock = System.currentTimeMillis()
 
+                    // BUG FIX v8.3: screenshot capture async — analyze শেষ হওয়ার আগে
+                    // foreground app whitelisted হয়ে গেলে block করা ঠিক হবে না।
+                    if (isForegroundPkgWhitelisted()) {
+                        Log.d(TAG, "Skip — foreground switched to whitelisted app during analyze")
+                        return@launch
+                    }
+
                     val isConfirmed = FalsePositiveDB.isConfirmedTrue(ctx, hash)
                     val showReport  = score < REPORT_THRESHOLD && !isConfirmed
 

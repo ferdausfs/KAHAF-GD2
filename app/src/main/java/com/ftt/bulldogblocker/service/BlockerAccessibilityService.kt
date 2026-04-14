@@ -302,6 +302,11 @@ class BlockerAccessibilityService : AccessibilityService() {
         countReport: Boolean = true
     ) {
         if (pkg == OUR_PACKAGE) return
+        // BUG FIX v8.3: ScreenshotBlocker-এর async analyze() শেষ হওয়ার আগে
+        // foreground app পালটে whitelisted হয়ে গেলেও এই callback fire হতো।
+        // debounceWindowCheck-এর 600ms delay-এও একই race condition সম্ভব।
+        // সমাধান: triggerBlock-এর ভেতরে সর্বশেষ whitelistCache দিয়ে আরেকবার চেক।
+        if (pkg != null && pkg.isNotEmpty() && pkg in whitelistCache) return
 
         val now = System.currentTimeMillis()
         if (now - lastBlockTime < BLOCK_COOLDOWN) return
