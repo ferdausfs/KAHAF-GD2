@@ -16,6 +16,7 @@ import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
+import com.ftt.bulldogblocker.AppReportManager
 import com.ftt.bulldogblocker.ml.FalsePositiveDB
 import com.google.android.material.bottomsheet.BottomSheetBehavior
 import com.google.android.material.bottomsheet.BottomSheetDialog
@@ -33,8 +34,15 @@ import com.google.android.material.bottomsheet.BottomSheetDialog
 class BlockScreenActivity : AppCompatActivity() {
 
     // BUG FIX #3: dialog field হিসেবে রাখো — onDestroy-এ dismiss করা যাবে।
-    // আগে local var ছিল → Activity destroy হলে dialog টিকে থাকতো → WindowLeakedException
     private var reportDialog: BottomSheetDialog? = null
+
+    private var countdownTimer: android.os.CountDownTimer? = null
+    private lateinit var tvCountdown: TextView
+
+    // Intent থেকে pkg পড়ো (triggerBlockScreen() এখন পাঠায়)
+    private val blockedPkg: String by lazy {
+        intent.getStringExtra("pkg") ?: ""
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -69,9 +77,17 @@ class BlockScreenActivity : AppCompatActivity() {
                 "নিচের রিপোর্ট পপআপটি পূরণ করুন ↓",
                 13f, Color.parseColor("#FFECB3"), Gravity.CENTER
             ))
-        } else {
-            root.addView(tv("Home বাটন চাপুন", 14f, Color.parseColor("#EF9A9A"), Gravity.CENTER))
         }
+
+        // NEW v8.3: countdown TextView — সবসময় দেখাবে
+        tvCountdown = TextView(this).apply {
+            textSize  = 20f
+            setTextColor(Color.WHITE)
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            gravity   = Gravity.CENTER
+            setPadding(0, dp(16), 0, 0)
+        }
+        root.addView(tvCountdown)
 
         setContentView(root)
 
@@ -80,11 +96,51 @@ class BlockScreenActivity : AppCompatActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        startCountdown()
+    }
+
+    override fun onPause() {
+        countdownTimer?.cancel()
+        super.onPause()
+    }
+
     override fun onDestroy() {
-        // BUG FIX #3: Dialog leak প্রতিরোধ — Activity destroy হলে dialog বন্ধ করো
+        countdownTimer?.cancel()
+        countdownTimer = null
         reportDialog?.dismiss()
         reportDialog = null
         super.onDestroy()
+    }
+
+    // ── Countdown ─────────────────────────────────────────────────────
+
+    private fun startCountdown() {
+        countdownTimer?.cancel()
+
+        val remainingMs = if (blockedPkg.isNotEmpty()) {
+            AppReportManager.getBlockRemainingMs(applicationContext, blockedPkg)
+        } else 0L
+
+        if (remainingMs <= 0L) {
+            tvCountdown.text = "Home বাটন চাপুন"
+            return
+        }
+
+        countdownTimer = object : android.os.CountDownTimer(remainingMs, 1_000L) {
+
+            override fun onTick(msUntilFinished: Long) {
+                val min = msUntilFinished / 60_000L
+                val sec = (msUntilFinished % 60_000L) / 1_000L
+                tvCountdown.text = "আর %d:%02d মিনিট বাকি".format(min, sec)
+            }
+
+            override fun onFinish() {
+                tvCountdown.text = "✅ ব্লক শেষ — Home বাটন চাপুন"
+            }
+
+        }.start()
     }
 
     // ── Report Bottom Sheet ───────────────────────────────────────────

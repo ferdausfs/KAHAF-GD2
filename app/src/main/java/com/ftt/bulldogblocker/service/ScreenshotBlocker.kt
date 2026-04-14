@@ -42,11 +42,15 @@ class ScreenshotBlocker(
         // Mostly-black ছাড়াও সাদা/solid color screen skip করতে হবে।
         // Variance < 150 = সব pixel প্রায় একই রঙ = loading screen / splash / solid UI।
         private const val UNIFORM_VARIANCE_THRESHOLD = 150f
+
+        // NEW v8.3: False positive হলে blocker এই সময় pause থাকবে
+        private const val FALSE_POSITIVE_PAUSE_MS = 60_000L
     }
 
     @Volatile private var busy          = false
     @Volatile private var busyStartTime = 0L
     @Volatile private var lastBlock     = 0L
+    @Volatile private var pauseUntil    = 0L
     private var job: Job?               = null
     private var classifier: ContentClassifier? = null
 
@@ -58,6 +62,12 @@ class ScreenshotBlocker(
                 delay(INTERVAL_MS)
                 val now = System.currentTimeMillis()
                 if (now - lastBlock < COOLDOWN_MS) continue
+
+                // NEW v8.3: false positive pause check
+                if (now < pauseUntil) {
+                    Log.d(TAG, "Paused — ${(pauseUntil - now) / 1000}s remaining")
+                    continue
+                }
 
                 if (isForegroundPkgWhitelisted()) {
                     Log.d(TAG, "Skip — foreground app is whitelisted or our own package")
@@ -81,6 +91,15 @@ class ScreenshotBlocker(
     fun stop() { job?.cancel(); job = null }
 
     fun resetCooldown() { lastBlock = System.currentTimeMillis() }
+
+    /**
+     * False positive confirm হলে এই সময়ের জন্য screenshot scanning বন্ধ।
+     * Default: FALSE_POSITIVE_PAUSE_MS (60 seconds)।
+     */
+    fun pauseFor(ms: Long = FALSE_POSITIVE_PAUSE_MS) {
+        pauseUntil = System.currentTimeMillis() + ms
+        Log.d(TAG, "Screenshot blocker paused for ${ms / 1000}s")
+    }
 
     // ── Capture ───────────────────────────────────────────────────────
 

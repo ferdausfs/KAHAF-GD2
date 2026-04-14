@@ -853,48 +853,17 @@ class MainActivity : AppCompatActivity() {
         val ctx  = this
 
         card.addView(tv(
-            "Content ধরা পড়লে সাথে সাথে block হবে না — নির্দিষ্ট বার পর block হবে।\nWarning overlay app-এর উপরে দেখাবে, threshold পার হলে app lock হবে।",
+            "Content ধরা পড়লে overlay দেখাবে — 'বন্ধ করো' চাপলে app block হবে।\nBlock duration এখানে সেট করুন।",
             size = 12f, color = "#AAAAAA"
         ))
         card.addView(gap(16))
-
-        // ── Report threshold ─────────────────────────────────────────
-        val curThreshold = AppReportManager.getReportThreshold(this)
-        val tvThreshLabel = tv("⚠️ Report Threshold: $curThreshold বার", size = 14f, color = "#FFFFFF")
-        card.addView(tvThreshLabel)
-        card.addView(gap(4))
-        card.addView(tv("এতবার content ধরা পড়লে app block হবে", size = 11f, color = "#888888"))
-        card.addView(gap(8))
-
-        val sbThresh = android.widget.SeekBar(this).apply {
-            max      = 9    // 1–10
-            progress = (curThreshold - 1).coerceIn(0, 9)
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
-            )
-            setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(sb: android.widget.SeekBar?, p: Int, fromUser: Boolean) {
-                    tvThreshLabel.text = "⚠️ Report Threshold: ${p + 1} বার"
-                }
-                override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {}
-                override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {
-                    val n = (sb?.progress ?: 2) + 1
-                    AppReportManager.setReportThreshold(ctx, n)
-                    Toast.makeText(ctx, "✅ Threshold: $n বার", Toast.LENGTH_SHORT).show()
-                }
-            })
-        }
-        card.addView(sbThresh)
-        card.addView(tv("← ১ বার (কঠোর)                    ১০ বার (নমনীয়) →", size = 10f, color = "#666666"))
-
-        card.addView(gap(20))
 
         // ── Block duration ────────────────────────────────────────────
         val curBlockMin = AppReportManager.getBlockDurationMinutes(this)
         val tvBlockLabel = tv("⏱ Block Duration: $curBlockMin মিনিট", size = 14f, color = "#FFFFFF")
         card.addView(tvBlockLabel)
         card.addView(gap(4))
-        card.addView(tv("Threshold পার হলে app এতক্ষণ ব্লক থাকবে", size = 11f, color = "#888888"))
+        card.addView(tv("'বন্ধ করো' চাপলে app এতক্ষণ ব্লক থাকবে", size = 11f, color = "#888888"))
         card.addView(gap(8))
 
         val sbBlock = android.widget.SeekBar(this).apply {

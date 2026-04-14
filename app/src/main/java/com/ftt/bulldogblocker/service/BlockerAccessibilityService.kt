@@ -153,8 +153,8 @@ class BlockerAccessibilityService : AccessibilityService() {
             !isSystemUiPackage(pkg)) {
             val prevPkg = currentForegroundPkg
             currentForegroundPkg = pkg
-            if (prevPkg != pkg && contentOverlay?.isShowing == true) {
-                serviceScope.launch(Dispatchers.Main) { contentOverlay?.hide() }
+            if (prevPkg != pkg) {
+                serviceScope.launch(Dispatchers.Main) { contentOverlay?.hideAll() }
             }
         }
 
@@ -175,7 +175,10 @@ class BlockerAccessibilityService : AccessibilityService() {
                     val remMs  = AppReportManager.getBlockRemainingMs(applicationContext, pkg)
                     val remMin = (remMs / 60_000L + 1L).toInt()
                     serviceScope.launch(Dispatchers.Main) {
-                        triggerBlockScreen(reason = "⏳ App ব্লক — আর $remMin মিনিট বাকি")
+                        triggerBlockScreen(
+                            reason = "⏳ App ব্লক — আর $remMin মিনিট বাকি",
+                            pkg    = pkg   // BUG FIX: countdown সঠিক দেখাতে pkg pass করতে হবে
+                        )
                     }
                 }
             }
@@ -296,55 +299,56 @@ class BlockerAccessibilityService : AccessibilityService() {
         if (pkg == OUR_PACKAGE) return
 
         val now = System.currentTimeMillis()
+        if (now - lastBlockTime < BLOCK_COOLDOWN) return
+        lastBlockTime = now
+
         val ctx = applicationContext
 
         if (countReport && pkg != null && pkg.isNotEmpty()) {
+            val safePkg = pkg   // BUG FIX: lambda-র ভেতরে String? smart cast কাজ করে না
+            (screenshotBlocker as? ScreenshotBlocker)?.resetCooldown()
 
-            // BUG FIX v8.2: cooldown check এখন addReport()-এর আগে।
-            // আগে: addReport() সর্বদাই call হতো, cooldown চেক পরে।
-            // ফলে: অন্য package-এর block (e.g., browser URL) lastBlockTime সেট করলে
-            //       এই package-এর count বাড়ত কিন্তু UI দেখা যেত না →
-            //       threshold silently পার → blockApp() → block screen নেই!
-            // এখন: cooldown-এ থাকলে সম্পূর্ণ skip — count বাড়বে না, UI দেখাবে না।
-            // ফলে: threshold-exceeded-এর পুরনো cooldown branch (v8.1) এখন dead code —
-            //       cooldown আগে চেক হলে threshold কখনো cooldown-এ পার হয় না।
-            if (now - lastBlockTime < BLOCK_COOLDOWN) return
-
-            val count     = AppReportManager.addReport(ctx, pkg)
-            val threshold = AppReportManager.getReportThreshold(ctx)
-
-            if (count < threshold) {
-                // ── Warning overlay দেখাও ──────────────────────────
-                Log.d(TAG, "Warning $count/$threshold for $pkg")
-                lastBlockTime = now
-                (screenshotBlocker as? ScreenshotBlocker)?.resetCooldown()
-                contentOverlay?.show(reason, count, threshold)
-                return
-
-            } else {
-                // ── Threshold পার → App block ──────────────────────
-                lastBlockTime = now
-                AppReportManager.blockApp(ctx, pkg)
-                val blockMin  = AppReportManager.getBlockDurationMs(ctx) / 60_000L
-                val fullReason = "$reason\n🔴 $blockMin মিনিটের জন্য app ব্লক হয়েছে"
-                triggerBlockScreen(reason = fullReason, hash = hash, score = score, showReport = showReport)
-                return
-            }
+            // User-decision overlay দেখাও
+            contentOverlay?.show(
+                reason  = reason,
+                onBlock = {
+                    // "বন্ধ করো" বা report "✅ সঠিক" → app block
+                    AppReportManager.blockApp(ctx, safePkg)
+                    val blockMin = AppReportManager.getBlockDurationMs(ctx) / 60_000L
+                    triggerBlockScreen(
+                        reason     = "$reason\n🔴 $blockMin মিনিটের জন্য app ব্লক হয়েছে",
+                        hash       = hash,
+                        score      = score,
+                        showReport = showReport,
+                        pkg        = safePkg
+                    )
+                },
+                onFalse = {
+                    // Report "❌ না, ভুল ছিল" → ScreenshotBlocker 1 min pause
+                    (screenshotBlocker as? ScreenshotBlocker)?.pauseFor(60_000L)
+                }
+            )
+            return
         }
 
-        // Browser URL block → সরাসরি block screen
-        if (now - lastBlockTime < BLOCK_COOLDOWN) return
-        lastBlockTime = now
-        triggerBlockScreen(reason = reason, hash = hash, score = score, showReport = showReport)
+        // Browser URL block → সরাসরি block screen (পরিবর্তন নেই)
+        triggerBlockScreen(
+            reason     = reason,
+            hash       = hash,
+            score      = score,
+            showReport = showReport,
+            pkg        = pkg ?: ""
+        )
     }
 
     private fun triggerBlockScreen(
         reason:     String,
         hash:       Long    = 0L,
         score:      Float   = 1f,
-        showReport: Boolean = false
+        showReport: Boolean = false,
+        pkg:        String  = ""
     ) {
-        contentOverlay?.hide()
+        contentOverlay?.hideAll()
         (screenshotBlocker as? ScreenshotBlocker)?.resetCooldown()
         performGlobalAction(GLOBAL_ACTION_HOME)
         try {
@@ -354,6 +358,7 @@ class BlockerAccessibilityService : AccessibilityService() {
                 putExtra("image_hash",  hash)
                 putExtra("score",       score)
                 putExtra("show_report", showReport)
+                putExtra("pkg",         pkg)
             })
         } catch (e: Exception) { Log.e(TAG, "launch BlockScreen failed", e) }
     }
