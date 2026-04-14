@@ -1,4 +1,4 @@
-# 🐶 Bulldog Blocker v8.0.0
+# 🐶 Bulldog Blocker v8.1.0
 
 Native Android app (Kotlin) — TFLite ML image classification + AccessibilityService content blocking.
 

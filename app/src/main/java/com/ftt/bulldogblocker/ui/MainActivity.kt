@@ -814,7 +814,7 @@ class MainActivity : AppCompatActivity() {
         val ctx  = this
 
         card.addView(tv(
-            "Content ধরা পড়লে সাথে সাথে block হবে না — নির্দিষ্ট বার পর block হবে।\nSreport পপআপ app-এর উপরে দেখাবে।",
+            "Content ধরা পড়লে সাথে সাথে block হবে না — নির্দিষ্ট বার পর block হবে।\nWarning overlay app-এর উপরে দেখাবে, threshold পার হলে app lock হবে।",
             size = 12f, color = "#AAAAAA"
         ))
         card.addView(gap(16))

@@ -43,29 +43,21 @@ class BlockerAccessibilityService : AccessibilityService() {
         private val SYSTEM_UI_PACKAGES = setOf(
             "android",
             "com.android.systemui",
-            // Google keyboards
             "com.google.android.inputmethod.latin",
             "com.google.android.inputmethod.pinyin",
-            // Samsung keyboards
             "com.samsung.android.honeyboard",
             "com.sec.android.inputmethod",
-            // Third-party keyboards
             "com.touchtype.swiftkey",
             "com.swiftkey.swiftkeyapp",
             "com.nuance.swype.dtc",
             "com.nuance.swype.trial",
-            // LG keyboard
             "com.lge.ime",
             "com.lg.lgime",
-            // MIUI system
             "com.miui.msa.global",
             "com.miui.systemAdSolution",
-            // Generic
             "com.android.settings.intelligence"
         )
 
-        // Prefix-based system UI detection — catches sub-packages not in the set above
-        // (e.g. com.android.systemui.overlay, com.android.systemui.recents, etc.)
         private val SYSTEM_UI_PREFIXES = arrayOf(
             "com.android.systemui.",
             "com.samsung.android.app.taskbar",
@@ -73,7 +65,6 @@ class BlockerAccessibilityService : AccessibilityService() {
             "com.nothing.launcher"
         )
 
-        /** Returns true if pkg is a system UI / keyboard / launcher package to be ignored */
         fun isSystemUiPackage(pkg: String): Boolean {
             if (pkg in SYSTEM_UI_PACKAGES) return true
             for (prefix in SYSTEM_UI_PREFIXES) {
@@ -113,10 +104,13 @@ class BlockerAccessibilityService : AccessibilityService() {
     @Volatile private var blacklistCache: Set<String> = emptySet()
     @Volatile private var whitelistCache: Set<String> = emptySet()
 
-    // v7 FIX #2: currentForegroundPkg শুধু real user app-এ update হবে (keyboard/SystemUI বাদে)
     @Volatile private var currentForegroundPkg: String = ""
 
-    private var reportOverlay: ReportOverlayManager? = null
+    // v8.1: Content warning overlay (threshold পার হওয়ার আগে দেখায়)
+    // BUG FIX v8.1: ReportOverlayManager সরানো হয়েছে — v8.1-এ আর ব্যবহার হয় না।
+    //   আগে: reportOverlay.show() → ছোট popup warning
+    //   এখন: contentOverlay.show() → full-screen warning overlay
+    private var contentOverlay: ContentOverlayManager? = null
 
     // ── Receivers ────────────────────────────────────────────────────
 
@@ -146,7 +140,8 @@ class BlockerAccessibilityService : AccessibilityService() {
         reloadAppLists()
         loadClassifier()
         registerReceivers()
-        reportOverlay = ReportOverlayManager(applicationContext)
+        // BUG FIX v8.1: reportOverlay সরানো হয়েছে (dead code — show() কোথাও call হয় না)
+        contentOverlay = ContentOverlayManager(this)
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -155,14 +150,17 @@ class BlockerAccessibilityService : AccessibilityService() {
 
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
 
-            // v7 BUG FIX #2: currentForegroundPkg শুধু real app-এ update হবে।
-            // System UI, keyboard, notification bar — এগুলো foreground tracker আপডেট করবে না।
-            // কারণ: keyboard খুললে পুরো block loop whitelist check ভেঙে যেত।
             if (!isSystemUiPackage(pkg)) {
+                val prevPkg = currentForegroundPkg
                 currentForegroundPkg = pkg
+
+                // v8.1: App বদলালে warning overlay auto-hide
+                if (prevPkg != pkg && contentOverlay?.isShowing == true) {
+                    serviceScope.launch(Dispatchers.Main) { contentOverlay?.hide() }
+                }
             }
 
-            // Blocked app enforcement
+            // Blocked app enforcement (threshold পার হলে app block থাকে)
             if (pkg != OUR_PACKAGE && pkg !in whitelistCache &&
                 AppReportManager.isBlocked(applicationContext, pkg)) {
                 val remMs  = AppReportManager.getBlockRemainingMs(applicationContext, pkg)
@@ -190,8 +188,9 @@ class BlockerAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         (screenshotBlocker as? ScreenshotBlocker)?.stop()
         screenshotBlocker = null
-        reportOverlay?.destroy()
-        reportOverlay = null
+        contentOverlay?.destroy()
+        contentOverlay = null
+        // BUG FIX v8.1: reportOverlay?.destroy() সরানো হয়েছে — field আর নেই
         serviceScope.cancel()
         classifier?.close()
         classifier = null
@@ -239,11 +238,6 @@ class BlockerAccessibilityService : AccessibilityService() {
         val blocker = ScreenshotBlocker(
             service = this,
             scope   = serviceScope,
-            // v7 BUG FIX #2 + #3:
-            // Whitelist check-এ OUR_PACKAGE যোগ করা হয়েছে।
-            // কারণ: BlockScreenActivity খোলা থাকলে currentForegroundPkg = "com.ftt.bulldogblocker"।
-            // তখন ML scan চলতে থাকলে BlockScreen-এর screenshot analyze হয় → self-block loop।
-            // Fix: foreground = OUR_PACKAGE হলে scan skip করো।
             isForegroundPkgWhitelisted = {
                 whitelistCache.contains(currentForegroundPkg) ||
                 currentForegroundPkg == OUR_PACKAGE
@@ -266,6 +260,21 @@ class BlockerAccessibilityService : AccessibilityService() {
 
     // ── Block trigger ─────────────────────────────────────────────────
 
+    /**
+     * v8.1 — Hybrid warning + block system:
+     *
+     *  count < threshold
+     *    → ContentOverlayManager.show("সতর্কতা X/N")
+     *      App-এর উপরে warning popup, app চলতে থাকে
+     *      User "বুঝলাম" দিয়ে dismiss করতে পারে
+     *
+     *  count >= threshold
+     *    → AppReportManager.blockApp(pkg)
+     *    → triggerBlockScreen() → Home + Full block screen
+     *      App নির্দিষ্ট সময়ের জন্য lock
+     *
+     *  Browser URL → countReport=false → সরাসরি block screen
+     */
     private fun triggerBlock(
         reason:      String,
         hash:        Long    = 0L,
@@ -274,10 +283,6 @@ class BlockerAccessibilityService : AccessibilityService() {
         pkg:         String? = null,
         countReport: Boolean = true
     ) {
-        // v7 BUG FIX #3: নিজের package কখনো block করা যাবে না।
-        // আগে: pkg == OUR_PACKAGE হলে countReport block skip হতো,
-        //       কিন্তু সরাসরি direct-block path-এ পড়ে যেত → BulldogBlocker নিজেকে block করত।
-        // Fix: সবার আগে OUR_PACKAGE check করো → return।
         if (pkg == OUR_PACKAGE) return
 
         val now = System.currentTimeMillis()
@@ -289,25 +294,33 @@ class BlockerAccessibilityService : AccessibilityService() {
             val threshold = AppReportManager.getReportThreshold(ctx)
 
             if (count < threshold) {
-                Log.d(TAG, "Report $count/$threshold for $pkg")
+                // ── Warning overlay দেখাও ──────────────────────────
+                Log.d(TAG, "Warning $count/$threshold for $pkg")
+                if (now - lastBlockTime < BLOCK_COOLDOWN) return
+                lastBlockTime = now
                 (screenshotBlocker as? ScreenshotBlocker)?.resetCooldown()
-                reportOverlay?.show(count, threshold)
+                contentOverlay?.show(reason, count, threshold)
                 return
+
             } else {
+                // ── Threshold পার → App block ──────────────────────
+                // BUG FIX v8.1: cooldown-এর মধ্যে return করার আগে overlay hide করতে হবে।
+                // আগে: overlay দেখা যেত কিন্তু app আসলে block হয়ে যেত — confusing UX।
                 if (now - lastBlockTime < BLOCK_COOLDOWN) {
                     AppReportManager.blockApp(ctx, pkg)
+                    contentOverlay?.hide()   // BUG FIX: overlay সরাও, app blocked হয়েছে
                     return
                 }
                 lastBlockTime = now
                 AppReportManager.blockApp(ctx, pkg)
-                val blockMin = AppReportManager.getBlockDurationMs(ctx) / 60_000L
-                val fullReason = "$reason\n🔴 App $blockMin মিনিটের জন্য ব্লক হয়েছে"
+                val blockMin  = AppReportManager.getBlockDurationMs(ctx) / 60_000L
+                val fullReason = "$reason\n🔴 $blockMin মিনিটের জন্য app ব্লক হয়েছে"
                 triggerBlockScreen(reason = fullReason, hash = hash, score = score, showReport = showReport)
                 return
             }
         }
 
-        // Direct block (countReport=false or browser)
+        // Browser URL block → সরাসরি block screen
         if (now - lastBlockTime < BLOCK_COOLDOWN) return
         lastBlockTime = now
         triggerBlockScreen(reason = reason, hash = hash, score = score, showReport = showReport)
@@ -319,6 +332,7 @@ class BlockerAccessibilityService : AccessibilityService() {
         score:      Float   = 1f,
         showReport: Boolean = false
     ) {
+        contentOverlay?.hide()
         (screenshotBlocker as? ScreenshotBlocker)?.resetCooldown()
         performGlobalAction(GLOBAL_ACTION_HOME)
         try {
