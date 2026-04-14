@@ -148,28 +148,38 @@ class BlockerAccessibilityService : AccessibilityService() {
         event ?: return
         val pkg = event.packageName?.toString() ?: return
 
-        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+        // ── Foreground tracking + overlay auto-hide ───────────────────
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            !isSystemUiPackage(pkg)) {
+            val prevPkg = currentForegroundPkg
+            currentForegroundPkg = pkg
+            if (prevPkg != pkg && contentOverlay?.isShowing == true) {
+                serviceScope.launch(Dispatchers.Main) { contentOverlay?.hide() }
+            }
+        }
 
-            if (!isSystemUiPackage(pkg)) {
-                val prevPkg = currentForegroundPkg
-                currentForegroundPkg = pkg
-
-                // v8.1: App বদলালে warning overlay auto-hide
-                if (prevPkg != pkg && contentOverlay?.isShowing == true) {
-                    serviceScope.launch(Dispatchers.Main) { contentOverlay?.hide() }
+        // ── Blocked app enforcement ───────────────────────────────────
+        // BUG FIX v8.2: আগে এই check শুধু TYPE_WINDOW_STATE_CHANGED-এর ভেতরে ছিল।
+        // ফলে: blocked app-এর TYPE_WINDOW_CONTENT_CHANGED events handleWindowTextEvent-এ
+        //       পৌঁছাতো → addReport() + blockApp() repeatedly call হতো → cooldown ছাড়াই
+        //       triggerBlockScreen() বারবার fire করতো (block screen spam)।
+        // এখন:
+        //   • সব event type-এর জন্য early return → content scanner blocked app পাবে না।
+        //   • Block screen শুধু TYPE_WINDOW_STATE_CHANGED-এ, BLOCK_COOLDOWN সহ।
+        if (pkg != OUR_PACKAGE && pkg !in whitelistCache &&
+            AppReportManager.isBlocked(applicationContext, pkg)) {
+            if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+                val now = System.currentTimeMillis()
+                if (now - lastBlockTime >= BLOCK_COOLDOWN) {
+                    lastBlockTime = now
+                    val remMs  = AppReportManager.getBlockRemainingMs(applicationContext, pkg)
+                    val remMin = (remMs / 60_000L + 1L).toInt()
+                    serviceScope.launch(Dispatchers.Main) {
+                        triggerBlockScreen(reason = "⏳ App ব্লক — আর $remMin মিনিট বাকি")
+                    }
                 }
             }
-
-            // Blocked app enforcement (threshold পার হলে app block থাকে)
-            if (pkg != OUR_PACKAGE && pkg !in whitelistCache &&
-                AppReportManager.isBlocked(applicationContext, pkg)) {
-                val remMs  = AppReportManager.getBlockRemainingMs(applicationContext, pkg)
-                val remMin = (remMs / 60_000L + 1L).toInt()
-                serviceScope.launch(Dispatchers.Main) {
-                    triggerBlockScreen(reason = "⏳ App ব্লক — আর $remMin মিনিট বাকি")
-                }
-                return
-            }
+            return  // blocked app-এর কোনো event-ই content scanner-এ পৌঁছাবে না
         }
 
         if (pkg in whitelistCache) return
@@ -290,13 +300,22 @@ class BlockerAccessibilityService : AccessibilityService() {
 
         if (countReport && pkg != null && pkg.isNotEmpty()) {
 
+            // BUG FIX v8.2: cooldown check এখন addReport()-এর আগে।
+            // আগে: addReport() সর্বদাই call হতো, cooldown চেক পরে।
+            // ফলে: অন্য package-এর block (e.g., browser URL) lastBlockTime সেট করলে
+            //       এই package-এর count বাড়ত কিন্তু UI দেখা যেত না →
+            //       threshold silently পার → blockApp() → block screen নেই!
+            // এখন: cooldown-এ থাকলে সম্পূর্ণ skip — count বাড়বে না, UI দেখাবে না।
+            // ফলে: threshold-exceeded-এর পুরনো cooldown branch (v8.1) এখন dead code —
+            //       cooldown আগে চেক হলে threshold কখনো cooldown-এ পার হয় না।
+            if (now - lastBlockTime < BLOCK_COOLDOWN) return
+
             val count     = AppReportManager.addReport(ctx, pkg)
             val threshold = AppReportManager.getReportThreshold(ctx)
 
             if (count < threshold) {
                 // ── Warning overlay দেখাও ──────────────────────────
                 Log.d(TAG, "Warning $count/$threshold for $pkg")
-                if (now - lastBlockTime < BLOCK_COOLDOWN) return
                 lastBlockTime = now
                 (screenshotBlocker as? ScreenshotBlocker)?.resetCooldown()
                 contentOverlay?.show(reason, count, threshold)
@@ -304,13 +323,6 @@ class BlockerAccessibilityService : AccessibilityService() {
 
             } else {
                 // ── Threshold পার → App block ──────────────────────
-                // BUG FIX v8.1: cooldown-এর মধ্যে return করার আগে overlay hide করতে হবে।
-                // আগে: overlay দেখা যেত কিন্তু app আসলে block হয়ে যেত — confusing UX।
-                if (now - lastBlockTime < BLOCK_COOLDOWN) {
-                    AppReportManager.blockApp(ctx, pkg)
-                    contentOverlay?.hide()   // BUG FIX: overlay সরাও, app blocked হয়েছে
-                    return
-                }
                 lastBlockTime = now
                 AppReportManager.blockApp(ctx, pkg)
                 val blockMin  = AppReportManager.getBlockDurationMs(ctx) / 60_000L

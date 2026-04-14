@@ -119,9 +119,13 @@ class ScreenshotBlocker(
             try {
                 val hb = result.hardwareBuffer ?: run { busy = false; return@launch }
 
-                full = Bitmap.wrapHardwareBuffer(hb, result.colorSpace)
-                    ?.copy(Bitmap.Config.ARGB_8888, false)
-                    ?: run { busy = false; return@launch }
+                // BUG FIX v8.2: wrapHardwareBuffer() থেকে যে hw bitmap তৈরি হয়,
+                // সেটা .copy() করার পর আগে recycle হতো না → memory leak।
+                // এখন: hwBitmap আলাদা রাখা হয়েছে এবং copy-র পরেই recycle করা হয়।
+                val hwBitmap = Bitmap.wrapHardwareBuffer(hb, result.colorSpace)
+                full = hwBitmap?.copy(Bitmap.Config.ARGB_8888, false)
+                hwBitmap?.recycle()
+                full ?: run { busy = false; return@launch }
 
                 val w = full.width
                 val h = full.height

@@ -324,6 +324,45 @@ class MainActivity : AppCompatActivity() {
             }
             addView(sbScreenshot)
             addView(tv("← বেশি কঠোর (5%)    কম কঠোর (60%) →", size = 10f, color = "#666666"))
+
+            addView(gap(20))
+
+            // ── Sexy Alone Threshold (5-class model only) ─────────────
+            // BUG FIX v8.2: ThresholdManager-এ sexy_alone threshold আছে কিন্তু
+            // MainActivity-তে এর কোনো SeekBar ছিল না।
+            // inception_v3 (5-class) model ব্যবহারকারীরা এই value adjust করতে পারতেন না।
+            val sexyPct = (ThresholdManager.getSexyAlone(this@MainActivity) * 100).toInt()
+            val tvSexyLabel = tv("💃 Sexy-Alone Threshold: ${sexyPct}%", size = 14f, color = "#FFFFFF")
+            addView(tvSexyLabel)
+            addView(gap(4))
+            addView(tv(
+                "5-class model: শুধু sexy score এই মান পার করলেই block (bra/lingerie)\n2-class model-এ এই setting কাজ করে না",
+                size = 11f, color = "#888888"
+            ))
+            addView(gap(8))
+
+            val sbSexy = android.widget.SeekBar(this@MainActivity).apply {
+                max      = 60          // 0–60 → 20%–80%
+                progress = sexyPct - 20
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+                setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(sb: android.widget.SeekBar?, p: Int, fromUser: Boolean) {
+                        val pct = p + 20
+                        tvSexyLabel.text = "💃 Sexy-Alone Threshold: ${pct}%"
+                    }
+                    override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {}
+                    override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {
+                        val pct = (sb?.progress ?: 25) + 20
+                        ThresholdManager.setSexyAlone(this@MainActivity, pct / 100f)
+                        Toast.makeText(this@MainActivity, "✅ Sexy-alone threshold: ${pct}%", Toast.LENGTH_SHORT).show()
+                    }
+                })
+            }
+            addView(sbSexy)
+            addView(tv("← বেশি কঠোর (20%)    কম কঠোর (80%) →", size = 10f, color = "#666666"))
         })
 
         root.addView(gap(48))
