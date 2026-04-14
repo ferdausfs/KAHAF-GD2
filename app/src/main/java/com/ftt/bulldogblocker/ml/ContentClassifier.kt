@@ -32,10 +32,43 @@ class ContentClassifier(private val context: Context) {
     )
 
     companion object {
-        const val MODEL_FILENAME   = "saved_model.tflite"
+        const val MODEL_FILENAME = "saved_model.tflite"
+        const val ML_DIR_NAME    = "BulldogML"
         private const val INPUT_SIZE = 224
 
-        fun modelFile(ctx: Context): File = File(ctx.filesDir, MODEL_FILENAME)
+        /** ML folder: filesDir/BulldogML/ — auto-created if missing */
+        fun mlDir(ctx: Context): File =
+            File(ctx.filesDir, ML_DIR_NAME).also { if (!it.exists()) it.mkdirs() }
+
+        /**
+         * Model file path: filesDir/BulldogML/saved_model.tflite
+         *
+         * BUG FIX: আগে migration (file copy/delete) এখানেই করা হতো।
+         * কিন্তু এই function main thread থেকে call হয় (refreshStatus)-এ।
+         * বড় model file-এ copy করলে UI freeze হতো।
+         *
+         * Fix: এই function শুধু File reference return করে — কোনো IO নেই।
+         * Migration এখন শুধু migrateModelIfNeeded()-এ, background thread থেকে call করতে হবে।
+         */
+        fun modelFile(ctx: Context): File =
+            File(mlDir(ctx), MODEL_FILENAME)
+
+        /**
+         * ⚠️ BACKGROUND THREAD ONLY — file IO করে।
+         * পুরনো path (filesDir/saved_model.tflite) থেকে নতুন BulldogML/ folder-এ move করে।
+         * ContentClassifier.load() এবং importModel() — উভয় জায়গাই background thread-এ call হয়।
+         */
+        fun migrateModelIfNeeded(ctx: Context) {
+            val newFile = modelFile(ctx)
+            val oldFile = File(ctx.filesDir, MODEL_FILENAME)
+            if (oldFile.exists() && !newFile.exists()) {
+                try {
+                    oldFile.copyTo(newFile, overwrite = false)
+                    oldFile.delete()
+                } catch (_: Exception) {}
+            }
+        }
+
         fun isReady(ctx: Context): Boolean =
             modelFile(ctx).let { it.exists() && it.length() > 0 }
     }
@@ -47,6 +80,7 @@ class ContentClassifier(private val context: Context) {
      * Returns true on success.
      */
     fun load(): Boolean = try {
+        migrateModelIfNeeded(context)   // BUG FIX: migration only on background thread
         val file = modelFile(context)
         if (!file.exists()) {
             false

@@ -16,7 +16,9 @@ import android.view.View
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import com.ftt.bulldogblocker.AppListManager
+import com.ftt.bulldogblocker.AppReportManager
 import com.ftt.bulldogblocker.ThresholdManager
+import com.ftt.bulldogblocker.UninstallProtectionManager
 import com.ftt.bulldogblocker.admin.DeviceAdminReceiver
 import com.ftt.bulldogblocker.ml.ContentClassifier
 import com.ftt.bulldogblocker.service.BlockerAccessibilityService
@@ -164,6 +166,18 @@ class MainActivity : AppCompatActivity() {
             addView(gap(8))
             addView(btn("➕  App যোগ করুন", "#1A237E") { showAppPicker(isBlacklist = false) })
         })
+
+        root.addView(gap(24))
+
+        // ── Uninstall Protection Settings ────────────────────────────
+        root.addView(sectionLabel("🛡️ UNINSTALL PROTECTION"))
+        root.addView(buildUninstallProtectionCard())
+
+        root.addView(gap(24))
+
+        // ── Content Report Settings ───────────────────────────────────
+        root.addView(sectionLabel("📊 CONTENT REPORT SETTINGS"))
+        root.addView(buildReportSettingsCard())
 
         root.addView(gap(24))
 
@@ -465,7 +479,8 @@ class MainActivity : AppCompatActivity() {
             val mb = ContentClassifier.modelFile(this).length() / (1024 * 1024)
             tvModelStatus.text = "✅ Model লোড হয়েছে"
             tvModelStatus.setTextColor(Color.parseColor("#4CAF50"))
-            tvModelInfo.text = "📁 saved_model.tflite  •  ${mb} MB"
+            val mlPath = ContentClassifier.mlDir(this).absolutePath
+            tvModelInfo.text = "📁 ${ContentClassifier.ML_DIR_NAME}/${ContentClassifier.MODEL_FILENAME}  •  ${mb} MB\n🗂 $mlPath"
             btnUploadModel.text = "🔄 Model পরিবর্তন করুন"
         } else {
             tvModelStatus.text = "⚠️ Model আপলোড করা হয়নি"
@@ -629,6 +644,243 @@ class MainActivity : AppCompatActivity() {
             }
             REQ_ADMIN -> refreshStatus()
         }
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // UNINSTALL PROTECTION CARD
+    // ════════════════════════════════════════════════════════════════
+
+    private fun buildUninstallProtectionCard(): LinearLayout {
+        val card = card()
+        val ctx  = this
+
+        card.addView(tv(
+            "Uninstall করার আগে কতক্ষণ অপেক্ষা করতে হবে তা সেট করুন:",
+            size = 12f, color = "#AAAAAA"
+        ))
+        card.addView(gap(12))
+
+        // ── Mode selector ────────────────────────────────────────────
+        val currentMode = UninstallProtectionManager.getMode(this)
+
+        val radioGroup = android.widget.RadioGroup(this).apply {
+            orientation = android.widget.RadioGroup.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        fun makeRadio(label: String, mode: UninstallProtectionManager.Mode) =
+            android.widget.RadioButton(ctx).apply {
+                text = label
+                id   = android.view.View.generateViewId()
+                setTextColor(Color.parseColor("#DDDDDD"))
+                textSize = 12f
+                tag  = mode
+                isChecked = (mode == currentMode)
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            }
+
+        val rbTesting = makeRadio("🧪 Testing", UninstallProtectionManager.Mode.TESTING)
+        val rbTime    = makeRadio("⏱ By Time",  UninstallProtectionManager.Mode.BY_TIME)
+        val rbDate    = makeRadio("📅 By Date",  UninstallProtectionManager.Mode.BY_DATE)
+
+        radioGroup.addView(rbTesting)
+        radioGroup.addView(rbTime)
+        radioGroup.addView(rbDate)
+        card.addView(radioGroup)
+        card.addView(gap(16))
+
+        // ── BY_TIME controls ─────────────────────────────────────────
+        val timePanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility  = if (currentMode == UninstallProtectionManager.Mode.BY_TIME)
+                android.view.View.VISIBLE else android.view.View.GONE
+        }
+        val delayMin = UninstallProtectionManager.getDelayMinutes(this)
+        val tvTimeLabel = tv("⏱ Delay: ${formatMinutes(delayMin)}", size = 14f, color = "#FFFFFF")
+        timePanel.addView(tvTimeLabel)
+        timePanel.addView(gap(8))
+
+        val sbTime = android.widget.SeekBar(this).apply {
+            max      = 299     // 1–300 minutes
+            progress = (delayMin - 1).coerceIn(0, 299)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+            setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: android.widget.SeekBar?, p: Int, fromUser: Boolean) {
+                    val m = p + 1
+                    tvTimeLabel.text = "⏱ Delay: ${formatMinutes(m)}"
+                }
+                override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {}
+                override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {
+                    val m = (sb?.progress ?: 59) + 1
+                    UninstallProtectionManager.setDelayMinutes(ctx, m)
+                    UninstallProtectionManager.resetAttempt(ctx)   // reset so new delay applies
+                    Toast.makeText(ctx, "✅ Delay: ${formatMinutes(m)}", Toast.LENGTH_SHORT).show()
+                }
+            })
+        }
+        timePanel.addView(sbTime)
+        timePanel.addView(tv("← 1 মিনিট                        300 মিনিট →", size = 10f, color = "#666666"))
+        card.addView(timePanel)
+
+        // ── BY_DATE controls ─────────────────────────────────────────
+        val datePanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility  = if (currentMode == UninstallProtectionManager.Mode.BY_DATE)
+                android.view.View.VISIBLE else android.view.View.GONE
+        }
+        val delayDays = UninstallProtectionManager.getDelayDays(this)
+        val tvDateLabel = tv("📅 Delay: ${delayDays} দিন", size = 14f, color = "#FFFFFF")
+        datePanel.addView(tvDateLabel)
+        datePanel.addView(gap(8))
+
+        val sbDate = android.widget.SeekBar(this).apply {
+            max      = 29     // 1–30 days
+            progress = (delayDays - 1).coerceIn(0, 29)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+            setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: android.widget.SeekBar?, p: Int, fromUser: Boolean) {
+                    tvDateLabel.text = "📅 Delay: ${p + 1} দিন"
+                }
+                override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {}
+                override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {
+                    val d = (sb?.progress ?: 2) + 1
+                    UninstallProtectionManager.setDelayDays(ctx, d)
+                    UninstallProtectionManager.resetAttempt(ctx)
+                    Toast.makeText(ctx, "✅ Delay: $d দিন", Toast.LENGTH_SHORT).show()
+                }
+            })
+        }
+        datePanel.addView(sbDate)
+        datePanel.addView(tv("← ১ দিন                              ৩০ দিন →", size = 10f, color = "#666666"))
+        card.addView(datePanel)
+
+        // ── Radio group change listener ──────────────────────────────
+        // BUG FIX #6: isRadioInitializing guard।
+        // RadioGroup কখনো startup-এ checked state reconcile করতে গিয়ে listener fire করতে পারে।
+        // সেই ক্ষেত্রে resetAttempt() ডাকলে uninstall timer reset হয়ে যাবে।
+        // Fix: listener addView-এর পরে set করা হয়েছে + isRadioInitializing flag দিয়ে guard।
+        var isRadioInitializing = true
+        radioGroup.setOnCheckedChangeListener { _, _ ->
+            if (isRadioInitializing) return@setOnCheckedChangeListener
+            val mode = when {
+                rbTesting.isChecked -> UninstallProtectionManager.Mode.TESTING
+                rbTime.isChecked    -> UninstallProtectionManager.Mode.BY_TIME
+                else                -> UninstallProtectionManager.Mode.BY_DATE
+            }
+            UninstallProtectionManager.setMode(ctx, mode)
+            UninstallProtectionManager.resetAttempt(ctx)
+            timePanel.visibility = if (mode == UninstallProtectionManager.Mode.BY_TIME)
+                android.view.View.VISIBLE else android.view.View.GONE
+            datePanel.visibility = if (mode == UninstallProtectionManager.Mode.BY_DATE)
+                android.view.View.VISIBLE else android.view.View.GONE
+            val label = when (mode) {
+                UninstallProtectionManager.Mode.TESTING -> "🧪 Testing (60s)"
+                UninstallProtectionManager.Mode.BY_TIME -> "⏱ By Time"
+                UninstallProtectionManager.Mode.BY_DATE -> "📅 By Date"
+            }
+            Toast.makeText(ctx, "✅ Mode: $label", Toast.LENGTH_SHORT).show()
+        }
+        isRadioInitializing = false   // listener এখন থেকে real user input-এ fire করবে
+
+        // ── Testing mode info ────────────────────────────────────────
+        card.addView(gap(8))
+        card.addView(tv(
+            "🧪 Testing = 60 সেকেন্ড  ·  ⏱ By Time = মিনিট/ঘণ্টা  ·  📅 By Date = দিন\nPhone restart করলেও timer চলতে থাকে (By Time / By Date)",
+            size = 11f, color = "#666666"
+        ))
+
+        return card
+    }
+
+    private fun formatMinutes(min: Int): String = when {
+        min < 60   -> "$min মিনিট"
+        min % 60 == 0 -> "${min / 60} ঘণ্টা"
+        else       -> "${min / 60} ঘণ্টা ${min % 60} মিনিট"
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // CONTENT REPORT SETTINGS CARD
+    // ════════════════════════════════════════════════════════════════
+
+    private fun buildReportSettingsCard(): LinearLayout {
+        val card = card()
+        val ctx  = this
+
+        card.addView(tv(
+            "Content ধরা পড়লে সাথে সাথে block হবে না — নির্দিষ্ট বার পর block হবে।\nSreport পপআপ app-এর উপরে দেখাবে।",
+            size = 12f, color = "#AAAAAA"
+        ))
+        card.addView(gap(16))
+
+        // ── Report threshold ─────────────────────────────────────────
+        val curThreshold = AppReportManager.getReportThreshold(this)
+        val tvThreshLabel = tv("⚠️ Report Threshold: $curThreshold বার", size = 14f, color = "#FFFFFF")
+        card.addView(tvThreshLabel)
+        card.addView(gap(4))
+        card.addView(tv("এতবার content ধরা পড়লে app block হবে", size = 11f, color = "#888888"))
+        card.addView(gap(8))
+
+        val sbThresh = android.widget.SeekBar(this).apply {
+            max      = 9    // 1–10
+            progress = (curThreshold - 1).coerceIn(0, 9)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+            setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: android.widget.SeekBar?, p: Int, fromUser: Boolean) {
+                    tvThreshLabel.text = "⚠️ Report Threshold: ${p + 1} বার"
+                }
+                override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {}
+                override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {
+                    val n = (sb?.progress ?: 2) + 1
+                    AppReportManager.setReportThreshold(ctx, n)
+                    Toast.makeText(ctx, "✅ Threshold: $n বার", Toast.LENGTH_SHORT).show()
+                }
+            })
+        }
+        card.addView(sbThresh)
+        card.addView(tv("← ১ বার (কঠোর)                    ১০ বার (নমনীয়) →", size = 10f, color = "#666666"))
+
+        card.addView(gap(20))
+
+        // ── Block duration ────────────────────────────────────────────
+        val curBlockMin = AppReportManager.getBlockDurationMinutes(this)
+        val tvBlockLabel = tv("⏱ Block Duration: $curBlockMin মিনিট", size = 14f, color = "#FFFFFF")
+        card.addView(tvBlockLabel)
+        card.addView(gap(4))
+        card.addView(tv("Threshold পার হলে app এতক্ষণ ব্লক থাকবে", size = 11f, color = "#888888"))
+        card.addView(gap(8))
+
+        val sbBlock = android.widget.SeekBar(this).apply {
+            max      = 115    // 5–120 minutes (step = 1, offset = 5)
+            progress = (curBlockMin - 5).coerceIn(0, 115)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+            setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: android.widget.SeekBar?, p: Int, fromUser: Boolean) {
+                    val m = p + 5
+                    tvBlockLabel.text = "⏱ Block Duration: $m মিনিট"
+                }
+                override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {}
+                override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {
+                    val m = (sb?.progress ?: 10) + 5
+                    AppReportManager.setBlockDurationMs(ctx, m * 60_000L)
+                    Toast.makeText(ctx, "✅ Block duration: $m মিনিট", Toast.LENGTH_SHORT).show()
+                }
+            })
+        }
+        card.addView(sbBlock)
+        card.addView(tv("← ৫ মিনিট                         ১২০ মিনিট →", size = 10f, color = "#666666"))
+
+        return card
     }
 
     // ════════════════════════════════════════════════════════════════

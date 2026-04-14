@@ -5,67 +5,77 @@ import android.content.Intent
 import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
-import android.os.CountDownTimer
+import android.os.Handler
+import android.os.Looper
 import android.view.Gravity
 import android.widget.*
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
+import com.ftt.bulldogblocker.UninstallProtectionManager
 import com.ftt.bulldogblocker.admin.DeviceAdminReceiver
 
 /**
- * Uninstall Delay Screen — enforces a 60-second wait before uninstall.
+ * Uninstall Delay Screen — 3 modes (set in MainActivity):
  *
- * Flow:
- *   User tries to uninstall -> Accessibility intercepts -> this screen opens
- *   -> 60s countdown -> "Proceed" button unlocks -> admin deactivated -> uninstall dialog
+ *   🧪 TESTING  → 60-second in-screen countdown
+ *   ⏱ BY_TIME   → N minutes countdown (persistent: timer survives restarts)
+ *   📅 BY_DATE   → N days countdown   (persistent: timer survives restarts)
+ *
+ * For BY_TIME & BY_DATE the unlock time is stored persistently so the
+ * user cannot bypass the timer by closing and re-opening this screen.
  */
 class UninstallDelayActivity : AppCompatActivity() {
-
-    companion object {
-        private const val DELAY_MS = 60_000L
-        private const val TICK_MS  = 1_000L
-        private const val KEY_REMAINING_MS  = "remaining_ms"
-        private const val KEY_COUNTDOWN_DONE = "countdown_done"
-    }
 
     private lateinit var tvCountdown : TextView
     private lateinit var progressBar : ProgressBar
     private lateinit var btnProceed  : Button
 
-    private var timer: CountDownTimer? = null
+    private val tickHandler  = Handler(Looper.getMainLooper())
     private var countdownDone = false
-    // FIX: Track remaining time so screen rotation resumes from correct position
-    private var remainingMs: Long = DELAY_MS
+    private var totalMs       = 60_000L
+
+    private val tickRunnable = object : Runnable {
+        override fun run() {
+            updateCountdown()
+            if (!countdownDone) tickHandler.postDelayed(this, 1_000L)
+        }
+    }
+
+    // ── Lifecycle ────────────────────────────────────────────────────
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // FIX: Restore state across rotation — without this, every rotation resets to 60s
-        if (savedInstanceState != null) {
-            remainingMs   = savedInstanceState.getLong(KEY_REMAINING_MS, DELAY_MS)
-            countdownDone = savedInstanceState.getBoolean(KEY_COUNTDOWN_DONE, false)
-        }
+
+        // Record first attempt — persists across restarts (BY_TIME / BY_DATE)
+        UninstallProtectionManager.recordFirstAttempt(this)
+
+        totalMs = UninstallProtectionManager.getTotalDelayMs(this)
+
         setContentView(buildLayout())
         setupBackHandler()
-        if (countdownDone) {
-            // Already finished — just unlock the button immediately
+
+        if (UninstallProtectionManager.isUnlocked(this)) {
             onCountdownFinished()
         } else {
-            startCountdown(remainingMs)
+            tickHandler.post(tickRunnable)
         }
     }
 
-    override fun onSaveInstanceState(outState: Bundle) {
-        super.onSaveInstanceState(outState)
-        outState.putLong(KEY_REMAINING_MS, remainingMs)
-        outState.putBoolean(KEY_COUNTDOWN_DONE, countdownDone)
+    override fun onResume() {
+        super.onResume()
+        // Re-check in case screen was open across the unlock boundary
+        if (!countdownDone && UninstallProtectionManager.isUnlocked(this)) {
+            onCountdownFinished()
+        }
     }
 
     override fun onDestroy() {
-        timer?.cancel()
+        tickHandler.removeCallbacksAndMessages(null)
         super.onDestroy()
     }
 
-    // Block hardware back button during countdown — use modern API
+    // ── Back handler ─────────────────────────────────────────────────
+
     private fun setupBackHandler() {
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
@@ -73,16 +83,65 @@ class UninstallDelayActivity : AppCompatActivity() {
                     isEnabled = false
                     onBackPressedDispatcher.onBackPressed()
                 }
-                // If countdown not done, silently consume the back press
+                // Silently consume back press during countdown
             }
         })
     }
 
+    // ── Countdown tick ───────────────────────────────────────────────
+
+    private fun updateCountdown() {
+        if (UninstallProtectionManager.isUnlocked(this)) {
+            onCountdownFinished()
+            return
+        }
+        val remaining = UninstallProtectionManager.getRemainingMs(this)
+        val elapsed   = (totalMs - remaining).coerceAtLeast(0L)
+        val progress  = ((elapsed.toDouble() / totalMs) * 10_000).toInt()
+
+        tvCountdown.text = UninstallProtectionManager.formatRemaining(remaining)
+        progressBar.progress = progress
+    }
+
+    private fun onCountdownFinished() {
+        tickHandler.removeCallbacksAndMessages(null)
+        countdownDone = true
+        progressBar.progress = 10_000
+
+        tvCountdown.text = "✅ অপেক্ষার সময় শেষ — এগিয়ে যেতে পারবেন"
+        tvCountdown.setTextColor(Color.parseColor("#4CAF50"))
+
+        btnProceed.isEnabled = true
+        btnProceed.alpha     = 1f
+        btnProceed.text      = "🗑 Uninstall করুন"
+        btnProceed.setBackgroundColor(Color.parseColor("#C62828"))
+    }
+
+    // ── Uninstall ─────────────────────────────────────────────────────
+
+    private fun proceedWithUninstall() {
+        if (!countdownDone) return
+        UninstallProtectionManager.resetAttempt(this)          // clear timer for next time
+        try {
+            val dpm = getSystemService(DEVICE_POLICY_SERVICE) as DevicePolicyManager
+            dpm.removeActiveAdmin(DeviceAdminReceiver.getComponentName(this))
+        } catch (_: Exception) {}
+        startActivity(Intent(Intent.ACTION_DELETE).apply {
+            data = Uri.parse("package:${packageName}")
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        })
+        finish()
+    }
+
+    // ── Layout ────────────────────────────────────────────────────────
+
     private fun buildLayout(): ScrollView {
+        val mode = UninstallProtectionManager.getMode(this)
+
         val scroll = ScrollView(this)
-        val root = LinearLayout(this).apply {
+        val root   = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
+            gravity     = Gravity.CENTER_HORIZONTAL
             setPadding(56, 100, 56, 56)
             setBackgroundColor(Color.parseColor("#1A0000"))
             layoutParams = LinearLayout.LayoutParams(
@@ -96,40 +155,79 @@ class UninstallDelayActivity : AppCompatActivity() {
             LinearLayout.LayoutParams.WRAP_CONTENT
         )
 
+        // Header
         root.addView(TextView(this).apply {
-            text = "Bulldog Blocker"
-            textSize = 26f
+            text = "🐶 Bulldog Blocker"
+            textSize = 24f
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
             layoutParams = lp()
         })
+
         root.addView(TextView(this).apply {
             text = "Uninstall Protection Active"
-            textSize = 15f
+            textSize = 14f
             setTextColor(Color.parseColor("#AAAAAA"))
             gravity = Gravity.CENTER
-            setPadding(0, 8, 0, 40)
-            layoutParams = lp()
-        })
-        root.addView(TextView(this).apply {
-            text = "Please wait before proceeding.\nMake sure you want to remove content protection."
-            textSize = 14f
-            setTextColor(Color.parseColor("#FF9800"))
-            gravity = Gravity.CENTER
-            setPadding(0, 0, 0, 32)
+            setPadding(0, 8, 0, 32)
             layoutParams = lp()
         })
 
+        // Mode badge
+        val (modeName, modeColor) = when (mode) {
+            UninstallProtectionManager.Mode.TESTING -> "🧪 Testing Mode" to "#1565C0"
+            UninstallProtectionManager.Mode.BY_TIME -> "⏱ Time Delay Mode" to "#6A1B9A"
+            UninstallProtectionManager.Mode.BY_DATE -> "📅 Date Delay Mode" to "#1B5E20"
+        }
+        root.addView(TextView(this).apply {
+            text = modeName
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            setPadding(24, 8, 24, 8)
+            setBackgroundColor(Color.parseColor(modeColor))
+            layoutParams = lp().apply { setMargins(0, 0, 0, 24) }
+        })
+
+        // Info message
+        val infoText = when (mode) {
+            UninstallProtectionManager.Mode.TESTING ->
+                "60 সেকেন্ড অপেক্ষা করুন।\nএরপর uninstall করা সম্ভব হবে।"
+            UninstallProtectionManager.Mode.BY_TIME -> {
+                // BUG FIX: আগে raw minutes দেখাতো ("120 মিনিট")।
+                // এখন formatted: "2 ঘণ্টা" বা "90 মিনিট" ইত্যাদি।
+                val min = UninstallProtectionManager.getDelayMinutes(this)
+                val formatted = if (min < 60) "$min মিনিট"
+                                else if (min % 60 == 0) "${min / 60} ঘণ্টা"
+                                else "${min / 60} ঘণ্টা ${min % 60} মিনিট"
+                "$formatted অপেক্ষা করুন।\nসময় শেষে uninstall সম্ভব হবে।"
+            }
+            UninstallProtectionManager.Mode.BY_DATE ->
+                "${UninstallProtectionManager.getDelayDays(this)} দিন পর uninstall সম্ভব।\nPhone restart করলেও timer চলতে থাকবে।"
+        }
+        root.addView(TextView(this).apply {
+            text = infoText
+            textSize = 13f
+            setTextColor(Color.parseColor("#FF9800"))
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, 24)
+            layoutParams = lp()
+        })
+
+        // Progress bar (max = 10000 for smooth display)
         progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
-            max = (DELAY_MS / TICK_MS).toInt()
+            max = 10_000
             progress = 0
             layoutParams = lp()
         }
         root.addView(progressBar)
 
+        // Countdown text
         tvCountdown = TextView(this).apply {
-            text = "${DELAY_MS / 1000} seconds remaining..."
-            textSize = 18f
+            text = UninstallProtectionManager.formatRemaining(
+                UninstallProtectionManager.getRemainingMs(this@UninstallDelayActivity)
+            )
+            textSize = 17f
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
             setPadding(0, 16, 0, 48)
@@ -137,8 +235,9 @@ class UninstallDelayActivity : AppCompatActivity() {
         }
         root.addView(tvCountdown)
 
+        // Cancel button
         root.addView(Button(this).apply {
-            text = "Cancel — Stay Protected"
+            text = "Cancel — সুরক্ষিত থাকুন"
             setBackgroundColor(Color.parseColor("#2E7D32"))
             setTextColor(Color.WHITE)
             layoutParams = lp()
@@ -146,11 +245,14 @@ class UninstallDelayActivity : AppCompatActivity() {
         })
 
         root.addView(android.view.View(this).apply {
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 16)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 16
+            )
         })
 
+        // Proceed button (disabled initially)
         btnProceed = Button(this).apply {
-            text = "Uninstall (please wait...)"
+            text = "⏳ অপেক্ষা করুন..."
             setBackgroundColor(Color.parseColor("#C62828"))
             setTextColor(Color.WHITE)
             isEnabled = false
@@ -162,45 +264,5 @@ class UninstallDelayActivity : AppCompatActivity() {
 
         scroll.addView(root)
         return scroll
-    }
-
-    private fun startCountdown(fromMs: Long = DELAY_MS) {
-        val totalTicks = (DELAY_MS / TICK_MS).toInt()
-        timer = object : CountDownTimer(fromMs, TICK_MS) {
-            override fun onTick(ms: Long) {
-                remainingMs = ms
-                val secs = ms / 1000
-                tvCountdown.text = "$secs seconds remaining..."
-                progressBar.progress = totalTicks - secs.toInt()
-            }
-            override fun onFinish() {
-                remainingMs = 0
-                onCountdownFinished()
-            }
-        }.start()
-    }
-
-    private fun onCountdownFinished() {
-        val totalTicks = (DELAY_MS / TICK_MS).toInt()
-        tvCountdown.text = "You may now uninstall"
-        progressBar.progress = totalTicks
-        btnProceed.isEnabled = true
-        btnProceed.alpha = 1f
-        btnProceed.text = "Uninstall"
-        countdownDone = true
-    }
-
-    private fun proceedWithUninstall() {
-        if (!countdownDone) return
-        try {
-            val dpm = getSystemService(DEVICE_POLICY_SERVICE) as DevicePolicyManager
-            dpm.removeActiveAdmin(DeviceAdminReceiver.getComponentName(this))
-        } catch (_: Exception) {}
-
-        startActivity(Intent(Intent.ACTION_DELETE).apply {
-            data = Uri.parse("package:${packageName}")
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        })
-        finish()
     }
 }
