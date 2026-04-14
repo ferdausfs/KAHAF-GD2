@@ -51,6 +51,11 @@ class ContentOverlayManager(private val service: AccessibilityService) {
     // reportShowing: শুধু main thread থেকে access — volatile লাগে না
     private var reportShowing: Boolean = false
 
+    // BUG FIX: overlay দেখানোর পর minimum এই সময় hideAll() ignore করো।
+    // Facebook-এর internal fragment/activity event-এ overlay তৎক্ষণাৎ hide হয়ে যেত।
+    private var shownAtMs = 0L
+    private val MIN_VISIBLE_MS = 3_000L
+
     private val isAnyShowing: Boolean
         get() = isShowing || reportShowing
 
@@ -73,6 +78,7 @@ class ContentOverlayManager(private val service: AccessibilityService) {
                 wm.addView(view, fullScreenParams())
                 mainView  = view
                 isShowing = true
+                shownAtMs = System.currentTimeMillis()
                 Log.d(TAG, "Main overlay shown")
             } catch (e: Exception) {
                 Log.e(TAG, "Main overlay show failed", e)
@@ -118,6 +124,13 @@ class ContentOverlayManager(private val service: AccessibilityService) {
     // ── Public: app পালটালে সব hide ──────────────────────────────────
 
     fun hideAll() {
+        // BUG FIX: overlay দেখানোর সাথে সাথে hide হয়ে যাওয়া রোধ করতে
+        // minimum visible time check। Facebook-এর internal event-এ
+        // overlay flash করে মিলিয়ে যেত এই check ছাড়া।
+        if (isShowing && System.currentTimeMillis() - shownAtMs < MIN_VISIBLE_MS) {
+            Log.d(TAG, "hideAll() ignored — overlay shown <${MIN_VISIBLE_MS}ms ago")
+            return
+        }
         hide()
         hideReport()
     }

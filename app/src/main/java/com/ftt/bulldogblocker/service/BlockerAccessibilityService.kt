@@ -153,7 +153,12 @@ class BlockerAccessibilityService : AccessibilityService() {
             !isSystemUiPackage(pkg)) {
             val prevPkg = currentForegroundPkg
             currentForegroundPkg = pkg
-            if (prevPkg != pkg) {
+            // BUG FIX: overlay showing থাকলে শুধু তখনই hideAll() করো
+            // যখন সত্যিকারের app switch হয়েছে (ভিন্ন package)।
+            // আগে: Facebook-এর internal fragment transition-এ prevPkg=="" বা prevPkg!=pkg
+            //       হলেই hideAll() → overlay দেখানোর সাথে সাথে hide হয়ে যেত।
+            // এখন: pkg যদি currentForegroundPkg-এর সাথে মেলে (same app) তাহলে hide করব না।
+            if (prevPkg.isNotEmpty() && prevPkg != pkg) {
                 serviceScope.launch(Dispatchers.Main) { contentOverlay?.hideAll() }
             }
         }
