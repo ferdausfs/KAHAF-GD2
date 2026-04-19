@@ -10,32 +10,22 @@ import android.os.Looper
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
-import dagger.hilt.android.qualifiers.ApplicationContext
 import timber.log.Timber
-import javax.inject.Inject
-import javax.inject.Singleton
 
 /**
- * BlurOverlayManager — shows / hides a full-screen blur overlay using WindowManager.
+ * BlurOverlayManager — full-screen overlay using TYPE_ACCESSIBILITY_OVERLAY.
  *
- * Uses TYPE_APPLICATION_OVERLAY (requires SYSTEM_ALERT_WINDOW permission, already
- * granted for the block overlay feature).
+ * TYPE_ACCESSIBILITY_OVERLAY is exclusively for AccessibilityServices —
+ * NO extra permissions needed (no SYSTEM_ALERT_WINDOW).
  *
- * Visual effect:
- *   • Android 12+ (API 31): real gaussian blur behind the overlay via blurBehindRadius
- *   • All versions: dark frosted-glass overlay (semi-transparent black)
- *
- * All WindowManager calls are posted to the main thread — safe to call from any thread.
+ * ⚠️  Must be created with the AccessibilityService as [context].
+ *     Call from onServiceConnected(), store as a field.
  */
-@Singleton
-class BlurOverlayManager @Inject constructor(
-    @ApplicationContext private val context: Context
-) {
+class BlurOverlayManager(private val context: Context) {
 
     companion object {
-        private const val TAG = "Guardian_BlurOverlay"
-        private const val OVERLAY_ALPHA = 0.82f       // 82% opaque dark overlay
-        private const val BLUR_RADIUS   = 30           // API 31+ gaussian radius
+        private const val TAG         = "Guardian_BlurOverlay"
+        private const val BLUR_RADIUS = 25   // API 31+ gaussian radius
     }
 
     @Volatile var isShowing = false
@@ -44,23 +34,14 @@ class BlurOverlayManager @Inject constructor(
     private var overlayView: View? = null
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    // ── Public API ─────────────────────────────────────────────────────
-
-    /**
-     * Show the blur overlay. Safe to call repeatedly — no-op if already showing.
-     * Must be called with SYSTEM_ALERT_WINDOW permission granted.
-     */
     fun show() {
         if (isShowing) return
         mainHandler.post {
-            if (isShowing) return@post    // double-check after post
+            if (isShowing) return@post
             addOverlay()
         }
     }
 
-    /**
-     * Hide the blur overlay. Safe to call repeatedly — no-op if not showing.
-     */
     fun hide() {
         if (!isShowing) return
         mainHandler.post {
@@ -69,28 +50,28 @@ class BlurOverlayManager @Inject constructor(
         }
     }
 
-    // ── Internal ───────────────────────────────────────────────────────
-
     private fun addOverlay() {
         try {
             val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
 
-            val view = buildOverlayView()
+            val view = View(context).apply {
+                // Deep dark fill — hides content on all API levels
+                setBackgroundColor(Color.argb(217, 0, 0, 0))
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            }
 
             val params = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.MATCH_PARENT,
                 WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                         or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                        or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-                        or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                        or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                 PixelFormat.TRANSLUCENT
             ).apply {
                 gravity = Gravity.TOP or Gravity.START
-                x = 0; y = 0
 
-                // Android 12+ real blur behind the overlay window
+                // Android 12+: real GPU blur behind the overlay
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                     @Suppress("DEPRECATION")
                     flags = flags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND
@@ -100,52 +81,26 @@ class BlurOverlayManager @Inject constructor(
 
             wm.addView(view, params)
             overlayView = view
-            isShowing = true
-            Timber.d("$TAG overlay SHOWN")
+            isShowing   = true
+            Timber.d("$TAG SHOWN (API ${Build.VERSION.SDK_INT})")
 
-        } catch (e: SecurityException) {
-            Timber.e(e, "$TAG No SYSTEM_ALERT_WINDOW permission — overlay blocked")
         } catch (e: Exception) {
-            Timber.e(e, "$TAG addOverlay failed")
+            Timber.e(e, "$TAG addOverlay FAILED: ${e.message}")
         }
     }
 
     private fun removeOverlay() {
         try {
-            val view = overlayView ?: return
-            val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-            wm.removeViewImmediate(view)
-            overlayView = null
-            isShowing = false
-            Timber.d("$TAG overlay HIDDEN")
+            overlayView?.let {
+                val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+                wm.removeViewImmediate(it)
+            }
         } catch (e: Exception) {
-            // View may have already been removed by the system
+            Timber.w("$TAG removeOverlay (harmless): ${e.message}")
+        } finally {
             overlayView = null
-            isShowing = false
-            Timber.w("$TAG removeOverlay exception (may be harmless): ${e.message}")
-        }
-    }
-
-    /**
-     * Build the visual overlay view.
-     *
-     * Design: deep dark frosted glass.
-     * • Pure black fill at OVERLAY_ALPHA for strong content occlusion.
-     * • On API 31+, the window-level gaussian blur adds the frosted effect behind.
-     * • On older APIs the dark fill alone is sufficient to block content.
-     */
-    private fun buildOverlayView(): View {
-        return View(context).apply {
-            // Dark semi-transparent fill — occludes any content underneath
-            setBackgroundColor(
-                Color.argb(
-                    (OVERLAY_ALPHA * 255).toInt(),
-                    0, 0, 0
-                )
-            )
-            // Accessibility: mark as non-interactive decoration
-            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-            contentDescription = null
+            isShowing   = false
+            Timber.d("$TAG HIDDEN")
         }
     }
 }

@@ -114,8 +114,11 @@ class GuardianAccessibilityService : AccessibilityService() {
             keywordRepo = entryPoint.keywordRepo()
             blockEventRepo = entryPoint.blockEventRepo()
             prefs = entryPoint.prefs()
-            blurOverlayManager = entryPoint.blurOverlayManager()
             blurTracker = entryPoint.cumulativeBlurTracker()
+            // BlurOverlayManager MUST use the service as context so it can use
+            // TYPE_ACCESSIBILITY_OVERLAY (which requires an AccessibilityService context,
+            // NOT ApplicationContext). Instantiate here after onServiceConnected().
+            blurOverlayManager = BlurOverlayManager(this@GuardianAccessibilityService)
             isInjected = true
             Timber.d("$TAG injection successful")
         } catch (e: Exception) {
