@@ -266,6 +266,8 @@ class GuardianAccessibilityService : AccessibilityService() {
 
         if (!AiDetector.isModelAvailable(applicationContext)) {
             Timber.w("$TAG AI enabled but model file not found!")
+            // BUG FIX: Broadcast to UI so user sees a warning — previously silently failed
+            sendBroadcast(Intent("com.guardian.shield.MODEL_MISSING"))
             stopAiScanLoop()
             return
         }

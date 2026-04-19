@@ -91,10 +91,20 @@ class BlurOverlayManager @Inject constructor(
                 x = 0; y = 0
 
                 // Android 12+ real blur behind the overlay window
+                // BUG FIX: Check isCrossWindowBlurEnabled() first — many OEMs (Samsung, Xiaomi)
+                // disable cross-window blur. Without this check the flag is set but has no effect,
+                // making it look like the overlay is just dark with no blur.
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    @Suppress("DEPRECATION")
-                    flags = flags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND
-                    blurBehindRadius = BLUR_RADIUS
+                    val wm2 = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+                    val blurSupported = wm2.isCrossWindowBlurEnabled
+                    if (blurSupported) {
+                        @Suppress("DEPRECATION")
+                        flags = flags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND
+                        blurBehindRadius = BLUR_RADIUS
+                        Timber.d("$TAG cross-window blur enabled — using gaussian blur")
+                    } else {
+                        Timber.d("$TAG cross-window blur disabled by device/OEM — using dark overlay only")
+                    }
                 }
             }
 

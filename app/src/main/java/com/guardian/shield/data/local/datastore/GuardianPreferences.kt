@@ -36,7 +36,7 @@ class GuardianPreferences @Inject constructor(
 
     val isAiDetectionEnabled: Flow<Boolean> = context.dataStore.data
         .catch { e -> Timber.e(e, "DataStore read error"); emit(emptyPreferences()) }
-        .map { it[KEY_AI_DETECTION_ON] ?: false }
+        .map { it[KEY_AI_DETECTION_ON] ?: true }   // BUG FIX: was false — AI (and blur) never started by default
 
     val isKeywordDetectionEnabled: Flow<Boolean> = context.dataStore.data
         .catch { e -> Timber.e(e, "DataStore read error"); emit(emptyPreferences()) }
