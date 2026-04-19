@@ -1,3 +1,4 @@
+// app/src/main/java/com/guardian/shield/viewmodel/DashboardViewModel.kt
 package com.guardian.shield.viewmodel
 
 import android.accessibilityservice.AccessibilityServiceInfo
@@ -7,6 +8,7 @@ import android.view.accessibility.AccessibilityManager
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.guardian.shield.data.local.datastore.GuardianPreferences
+import com.guardian.shield.data.repository.BlockEventRepository
 import com.guardian.shield.domain.model.BlockEvent
 import com.guardian.shield.domain.model.BlockStats
 import com.guardian.shield.domain.model.ProtectionState
@@ -14,8 +16,10 @@ import com.guardian.shield.domain.usecase.*
 import com.guardian.shield.service.accessibility.GuardianAccessibilityService
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import timber.log.Timber
 import javax.inject.Inject
 
@@ -38,7 +42,10 @@ class DashboardViewModel @Inject constructor(
     private val getBlockStatsUseCase: GetBlockStatsUseCase,
     private val toggleProtectionUseCase: ToggleProtectionUseCase,
     private val isPinSetUseCase: IsPinSetUseCase,
-    private val prefs: GuardianPreferences
+    private val prefs: GuardianPreferences,
+    // BUG FIX #10: Inject repo directly for cleanup. No use case needed — cleanup
+    // is a maintenance operation, not a domain action the user triggers.
+    private val blockEventRepo: BlockEventRepository
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(DashboardUiState())
@@ -48,13 +55,17 @@ class DashboardViewModel @Inject constructor(
         loadAll()
         observeRecentEvents()
         observePrefs()
+        // BUG FIX #10: Run cleanup on init — prune events older than 30 days.
+        // Previously cleanup() was never called → block_events table grew indefinitely.
+        // This is lightweight (one DELETE WHERE query) and runs on IO dispatcher.
+        runCleanup()
     }
 
     private fun loadAll() {
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true) }
             try {
-                val stats = getBlockStatsUseCase()
+                val stats = withContext(Dispatchers.IO) { getBlockStatsUseCase() }
                 _uiState.update { it.copy(stats = stats, isLoading = false) }
             } catch (e: Exception) {
                 Timber.e(e, "loadAll error")
@@ -72,11 +83,11 @@ class DashboardViewModel @Inject constructor(
                 }
                 .collect { events ->
                     _uiState.update { it.copy(recentEvents = events.take(10)) }
-                    // BUG FIX: Wrap stats refresh in try-catch.
+                    // Wrap stats refresh in try-catch.
                     // Without this, a Room IO failure would propagate out of collect(),
                     // cancel the entire coroutine, and freeze the dashboard permanently.
                     try {
-                        val stats = getBlockStatsUseCase()
+                        val stats = withContext(Dispatchers.IO) { getBlockStatsUseCase() }
                         _uiState.update { it.copy(stats = stats) }
                     } catch (e: Exception) {
                         Timber.e(e, "stats refresh error")
@@ -87,7 +98,7 @@ class DashboardViewModel @Inject constructor(
 
     private fun observePrefs() {
         viewModelScope.launch {
-            // BUG FIX: 4-arg combine uses the typed overload, avoiding Array<*> unboxing issues.
+            // 4-arg combine uses the typed overload, avoiding Array<*> unboxing issues.
             combine(
                 prefs.isProtectionEnabled,
                 prefs.isAiDetectionEnabled,
@@ -106,12 +117,25 @@ class DashboardViewModel @Inject constructor(
         }
     }
 
+    // BUG FIX #10: Prune block_events older than 30 days on every app launch.
+    // Runs silently on IO — no UI feedback needed, this is housekeeping.
+    private fun runCleanup() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                blockEventRepo.cleanup(olderThanDays = 30)
+                Timber.d("DashboardViewModel: cleanup complete")
+            } catch (e: Exception) {
+                Timber.w(e, "DashboardViewModel: cleanup failed (non-critical)")
+            }
+        }
+    }
+
     fun refreshProtectionState() {
         val isPinSet = isPinSetUseCase()
         val accessibility = isAccessibilityEnabled()
         val protState = ProtectionState(
             isAccessibilityEnabled      = accessibility,
-            isOverlayPermissionGranted  = true, // overlay not strictly needed for this approach
+            isOverlayPermissionGranted  = true,
             isPinSet                    = isPinSet,
             isProtectionActive          = accessibility && _uiState.value.isProtectionOn
         )
@@ -121,7 +145,6 @@ class DashboardViewModel @Inject constructor(
     fun toggleProtection(enabled: Boolean) {
         viewModelScope.launch {
             toggleProtectionUseCase(enabled)
-            // Notify service
             notifyServiceRulesChanged()
         }
     }

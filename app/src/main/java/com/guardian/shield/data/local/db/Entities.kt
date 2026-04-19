@@ -1,6 +1,8 @@
+// app/src/main/java/com/guardian/shield/data/local/db/Entities.kt
 package com.guardian.shield.data.local.db
 
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 import com.guardian.shield.domain.model.BlockReason
 
@@ -23,7 +25,14 @@ data class KeywordRuleEntity(
     val addedAt: Long = System.currentTimeMillis()
 )
 
-@Entity(tableName = "block_events")
+// BUG FIX #9: Added @Index on `timestamp`.
+// getTodayCount(startOfDay) and observeRecent() both filter/sort by timestamp.
+// Without this index, every query is a full table scan — gets slow as events accumulate.
+// With the index, both queries are O(log n) regardless of table size.
+@Entity(
+    tableName = "block_events",
+    indices = [Index(value = ["timestamp"])]
+)
 data class BlockEventEntity(
     @PrimaryKey(autoGenerate = true)
     val id: Long = 0,

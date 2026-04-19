@@ -10,25 +10,19 @@ import javax.inject.Singleton
  * CumulativeBlurTracker — tracks per-app total blur time.
  *
  * Logic:
- *   • onUnsafeDetected(pkg) → called every AI scan cycle when content is unsafe.
- *     Starts a blur session if not already started.
+ *   onUnsafeDetected(pkg) → starts a blur session if not already started.
  *     Returns BLOCK if cumulative total (including current session) >= 60s.
  *
- *   • onSafeDetected(pkg) → called when content clears.
- *     Ends the active blur session, adds its duration to the total.
+ *   onSafeDetected(pkg) → ends the active blur session, adds its duration to total.
  *     Returns BLOCK if total >= 60s.
  *
- *   • onAppChanged(pkg) → called when foreground app changes.
- *     Ends any active session for the old package (without resetting total).
- *     Resets the state for the new package entirely (fresh start per visit).
+ *   onAppChanged(pkg) → ends any active session for old pkg.
+ *     Resets state for new pkg (fresh start per visit).
  *
- * Example timeline for one session:
- *   t=0   unsafe → sessionStart=0
- *   t=10  safe   → total += 10s  (total=10s)  → no block
- *   t=25  unsafe → sessionStart=25
- *   t=27  safe   → total += 2s   (total=12s)  → no block
- *   t=60  unsafe → sessionStart=60
- *   t=108 scan   → total + (108-60) = 12+48 = 60s → BLOCK
+ * BUG FIX #5: BlurState fields are now `@Volatile` to prevent visibility issues
+ * when accessed from both the AI scan coroutine (Dispatchers.Default) and
+ * accessibility event callbacks concurrently. Methods are @Synchronized to
+ * prevent TOCTOU (time-of-check-time-of-use) races.
  */
 @Singleton
 class CumulativeBlurTracker @Inject constructor() {
@@ -38,10 +32,16 @@ class CumulativeBlurTracker @Inject constructor() {
         const val BLOCK_THRESHOLD_MS = 60_000L // 1 minute
     }
 
-    private data class BlurState(
-        var totalMs: Long = 0L,
-        var sessionStartMs: Long? = null  // null = no active blur session
-    )
+    /**
+     * Per-app blur state.
+     * @Synchronized methods on the outer class protect access.
+     * Fields marked @Volatile for cross-thread visibility even outside synchronized blocks
+     * (e.g. getTotalBlurMs() / remainingMs() used for logging only, not decisions).
+     */
+    private class BlurState {
+        @Volatile var totalMs: Long = 0L
+        @Volatile var sessionStartMs: Long? = null  // null = no active session
+    }
 
     private val states = ConcurrentHashMap<String, BlurState>()
 
@@ -51,6 +51,7 @@ class CumulativeBlurTracker @Inject constructor() {
      * Call when AI detects unsafe content.
      * @return true if cumulative blur has reached 60s (caller should block app)
      */
+    @Synchronized
     fun onUnsafeDetected(pkg: String): Boolean {
         val state = states.getOrPut(pkg) { BlurState() }
         if (state.sessionStartMs == null) {
@@ -67,6 +68,7 @@ class CumulativeBlurTracker @Inject constructor() {
      * Call when AI detects safe content (content has cleared).
      * @return true if cumulative blur has reached 60s (caller should block app)
      */
+    @Synchronized
     fun onSafeDetected(pkg: String): Boolean {
         val state = states[pkg] ?: return false
         val sessionStart = state.sessionStartMs ?: return false
@@ -81,12 +83,11 @@ class CumulativeBlurTracker @Inject constructor() {
 
     /**
      * Call when the foreground app changes.
-     * Ends any active blur session for the previous app (without resetting).
+     * Ends any active blur session for the previous app (preserves total — no reset).
      * Resets state for the new app (fresh 60s counter per visit).
      */
+    @Synchronized
     fun onAppChanged(prevPkg: String, newPkg: String) {
-        // End active session for previous app (don't reset total — keeps across revisits
-        // within the same process lifetime)
         states[prevPkg]?.let { state ->
             val sessionStart = state.sessionStartMs
             if (sessionStart != null) {
@@ -95,18 +96,19 @@ class CumulativeBlurTracker @Inject constructor() {
                 Timber.d("$TAG [$prevPkg] app changed — paused blur session")
             }
         }
-        // Reset the new app's counter entirely (fresh start)
+        // Reset the new app's counter entirely (fresh start per visit)
         states.remove(newPkg)
         Timber.d("$TAG [$newPkg] reset for new foreground visit")
     }
 
     /** Reset a specific app's blur state (e.g. after blocking). */
+    @Synchronized
     fun resetApp(pkg: String) {
         states.remove(pkg)
         Timber.d("$TAG [$pkg] state reset")
     }
 
-    /** Current total blur ms (including active session if running). */
+    /** Current total blur ms (including active session if running). For logging only. */
     fun getTotalBlurMs(pkg: String): Long {
         val state = states[pkg] ?: return 0L
         val sessionMs = state.sessionStartMs?.let { System.currentTimeMillis() - it } ?: 0L

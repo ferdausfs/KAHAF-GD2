@@ -1,3 +1,4 @@
+// app/src/main/java/com/guardian/shield/data/local/datastore/GuardianPreferences.kt
 package com.guardian.shield.data.local.datastore
 
 import android.content.Context
@@ -57,9 +58,13 @@ class GuardianPreferences @Inject constructor(
         .catch { e -> Timber.e(e, "DataStore read error"); emit(emptyPreferences()) }
         .map { it[KEY_AI_THRESHOLD] ?: 0.40f }
 
+    // BUG FIX #6: Default interval reduced from 2500ms → 1000ms.
+    // Old 2500ms + 12 tile inferences (~600ms) + overhead = ~3.5s blur delay.
+    // New 1000ms = blur appears within ~1.5s of content being detected.
+    // Range kept 1000-10000ms. Users who need less CPU usage can increase via settings.
     val aiIntervalMs: Flow<Long> = context.dataStore.data
         .catch { e -> Timber.e(e, "DataStore read error"); emit(emptyPreferences()) }
-        .map { it[KEY_AI_INTERVAL_MS] ?: 2_500L }
+        .map { it[KEY_AI_INTERVAL_MS] ?: 1_000L }
 
     suspend fun setProtectionEnabled(enabled: Boolean) {
         context.dataStore.edit { it[KEY_PROTECTION_ENABLED] = enabled }

@@ -81,6 +81,11 @@ class GuardianAccessibilityService : AccessibilityService() {
 
     private var textDebounceJob: Job? = null
 
+    // ── BUG FIX #2: Watchdog job stored so it can be cancelled when scan completes
+    // Old code: watchdog never cancelled → fired during NEXT scan → reset aiBusy=true
+    // Fix: cancel watchdog in analyzeScreenshot() finally block
+    @Volatile private var watchdogJob: Job? = null
+
     // ── Receiver (handles both REFRESH_RULES and RELOAD_MODEL) ────────
 
     private val refreshReceiver = object : BroadcastReceiver() {
@@ -134,7 +139,6 @@ class GuardianAccessibilityService : AccessibilityService() {
             loadSettings()
             blockingEngine.loadSettings()
 
-            // Auto-load AI model if enabled and available
             if (aiEnabled) {
                 Timber.d("$TAG AI enabled at startup — loading model")
                 reloadAiModel()
@@ -155,23 +159,25 @@ class GuardianAccessibilityService : AccessibilityService() {
             if (!SYSTEM_UI_SKIP.contains(pkg) && !rulesEngine.isSystemUi(pkg)) {
                 val prev = currentForegroundPkg
                 if (prev != pkg && prev.isNotBlank()) {
-                    // App switched — hide ALL blur overlays and notify tracker
                     regionBlurManager.hide()
                     blurOverlayManager.hide()
                     blurTracker.onAppChanged(prev, pkg)
                     Timber.d("Guardian_Service app changed: $prev → $pkg")
                 }
                 currentForegroundPkg = pkg
-                // BUG FIX: handleAppEvent was in a duplicate second if-block, causing it to
-                // fire for system UI packages (keyboard, IME, etc.) unnecessarily.
-                // Moved here so it only fires for real app foreground changes.
                 handleAppEvent(pkg)
             }
         }
 
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ||
             event.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED) {
-            debounceTextScan(pkg)
+            // BUG FIX #3: Use currentForegroundPkg, NOT the event's package.
+            // TYPE_WINDOW_CONTENT_CHANGED can fire from keyboards, notifications, overlays —
+            // the event's package is NOT the foreground app. Always scan the actual foreground app.
+            val scanPkg = currentForegroundPkg.takeIf { it.isNotBlank() } ?: return
+            if (!SYSTEM_UI_SKIP.contains(scanPkg) && !rulesEngine.isSystemUi(scanPkg)) {
+                debounceTextScan(scanPkg)
+            }
         }
     }
 
@@ -183,7 +189,7 @@ class GuardianAccessibilityService : AccessibilityService() {
         stopAiScanLoop()
         if (isInjected) {
             regionBlurManager.hide()
-            blurOverlayManager.hide()   // Clean up both overlays if service dies
+            blurOverlayManager.hide()
         }
         serviceScope.cancel()
         try { unregisterReceiver(refreshReceiver) } catch (_: Exception) {}
@@ -241,10 +247,9 @@ class GuardianAccessibilityService : AccessibilityService() {
         }
     }
 
-    // ── AI model reload (KEY FIX) ─────────────────────────────────────
+    // ── AI model reload ────────────────────────────────────────────────
 
     private suspend fun reloadAiModel() {
-        // Re-read settings first
         try {
             aiEnabled = prefs.isAiDetectionEnabled.first()
             aiThreshold = prefs.aiThreshold.first()
@@ -260,22 +265,16 @@ class GuardianAccessibilityService : AccessibilityService() {
             return
         }
 
-        // Check if model file exists
         if (!AiDetector.isModelAvailable(applicationContext)) {
             Timber.w("$TAG AI enabled but model file not found!")
             stopAiScanLoop()
             return
         }
 
-        // Load/reload the model
-        val ok = withContext(Dispatchers.IO) {
-            aiDetector.reload()
-        }
+        val ok = withContext(Dispatchers.IO) { aiDetector.reload() }
 
         if (ok) {
             Timber.d("$TAG AI model loaded: ${aiDetector.getModelType()}")
-
-            // Start scan loop on Android 11+
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 startAiScanLoop()
                 Timber.d("$TAG AI scan loop started (threshold=$aiThreshold, interval=${aiIntervalMs}ms)")
@@ -297,6 +296,13 @@ class GuardianAccessibilityService : AccessibilityService() {
             Timber.d("$TAG AI scan loop STARTED")
             while (isActive) {
                 delay(aiIntervalMs)
+
+                // BUG FIX #8: Guard blank pkg FIRST — cheapest check
+                if (currentForegroundPkg.isBlank()) continue
+
+                // BUG FIX #4: Skip ALL processing when protection is disabled
+                if (!rulesEngine.isProtectionActive()) continue
+
                 if (!aiDetector.isLoaded()) {
                     Timber.w("$TAG AI scan: model not loaded, skipping")
                     continue
@@ -304,7 +310,6 @@ class GuardianAccessibilityService : AccessibilityService() {
                 if (rulesEngine.isWhitelisted(currentForegroundPkg)) continue
                 if (blockingEngine.isCoolingDown()) continue
                 if (aiBusy) continue
-                if (currentForegroundPkg.isBlank()) continue
 
                 Timber.d("$TAG AI scan: analyzing ${currentForegroundPkg}...")
                 captureAndAnalyze()
@@ -318,16 +323,19 @@ class GuardianAccessibilityService : AccessibilityService() {
         Timber.d("$TAG AI scan loop STOPPED")
     }
 
+    // ── Screenshot capture ─────────────────────────────────────────────
+
     @androidx.annotation.RequiresApi(Build.VERSION_CODES.R)
     @android.annotation.SuppressLint("NewApi")
     private fun captureAndAnalyze() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
         aiBusy = true
 
-        // Safety watchdog: if takeScreenshot never calls back (rare system failure),
-        // aiBusy would stay true forever and the scan loop would be permanently frozen.
-        // Reset after 15s to guarantee forward progress.
-        serviceScope.launch {
+        // BUG FIX #2: Store watchdog job reference so we can cancel it when the
+        // screenshot analysis completes normally. Old code never cancelled the watchdog,
+        // so an old watchdog could fire during the NEXT scan cycle and reset aiBusy=true,
+        // permanently freezing the scan loop.
+        watchdogJob?.cancel()
+        watchdogJob = serviceScope.launch {
             delay(15_000)
             if (aiBusy) {
                 Timber.w("$TAG aiBusy watchdog fired — resetting (screenshot callback lost)")
@@ -343,9 +351,15 @@ class GuardianAccessibilityService : AccessibilityService() {
                     override fun onSuccess(result: ScreenshotResult) {
                         serviceScope.launch(Dispatchers.Default) {
                             analyzeScreenshot(result)
+                            // analyzeScreenshot sets aiBusy=false in its finally block
+                            // Cancel watchdog now that the analysis is done
+                            watchdogJob?.cancel()
+                            watchdogJob = null
                         }
                     }
                     override fun onFailure(errorCode: Int) {
+                        watchdogJob?.cancel()
+                        watchdogJob = null
                         aiBusy = false
                         if (errorCode != 2) {
                             Timber.w("$TAG screenshot failed: errorCode=$errorCode")
@@ -354,6 +368,8 @@ class GuardianAccessibilityService : AccessibilityService() {
                 }
             )
         } catch (e: Exception) {
+            watchdogJob?.cancel()
+            watchdogJob = null
             aiBusy = false
             Timber.e(e, "$TAG captureAndAnalyze error")
         }
@@ -380,9 +396,16 @@ class GuardianAccessibilityService : AccessibilityService() {
                 return
             }
 
-            val w = full.width; val h = full.height
-            val topCut = (h * 0.07f).toInt()   // Status bar
-            val botCut = (h * 0.09f).toInt()   // Nav bar
+            val w = full.width
+            val h = full.height
+
+            // BUG FIX #1 & #7: Use ACTUAL status/nav bar height instead of percentage guess.
+            // Old code: topCut = (h * 0.07f).toInt()
+            //   On 2400px phone: estimated=168px vs actual=72px → 96px error → blur off-position!
+            // New code: query real system dimension. Fallback to safe default if not available.
+            val topCut = getStatusBarHeight()
+            val botCut = getNavBarHeight()
+
             val cropH  = h - topCut - botCut
             cropped = if (cropH > 100) {
                 Bitmap.createBitmap(full, 0, topCut, w, cropH)
@@ -396,7 +419,7 @@ class GuardianAccessibilityService : AccessibilityService() {
                 return
             }
 
-            // ── Step 1: Whole-frame classification (fast, single inference) ──
+            // ── Step 1: Whole-frame classification ──
             val overallResult = aiDetector.classify(cropped, aiThreshold)
             val pkg = currentForegroundPkg
 
@@ -408,6 +431,7 @@ class GuardianAccessibilityService : AccessibilityService() {
                 if (evalResult is DetectionResult.Blur) {
 
                     // ── Step 2: Tile analysis — find WHICH regions are unsafe ──
+                    // screenOffsetY = topCut so tile rects use correct physical screen coords
                     tileResult = tileAnalyzer.analyzeTiles(
                         croppedBitmap  = cropped,
                         fullBitmap     = full,
@@ -416,26 +440,16 @@ class GuardianAccessibilityService : AccessibilityService() {
                     )
 
                     if (tileResult.isAnyUnsafe) {
-                        // ── REGION BLUR: pixelated patches on specific unsafe tiles ──
                         regionBlurManager.showRegions(tileResult.unsafeTiles)
                         tileResult = null   // ownership transferred to showRegions()
-                        blurOverlayManager.hide()   // dismiss fallback if it was showing
+                        blurOverlayManager.hide()
                         Timber.d("$TAG REGION BLUR shown for $pkg")
                     } else {
-                        // ROOT CAUSE FIX B: whole frame flagged but no specific tiles identified.
-                        // Previously: did nothing — timer never advanced, blur never showed.
-                        // Fix: show full-screen blur as fallback so the user sees SOMETHING,
-                        // and the timer still advances toward the block threshold.
                         blurOverlayManager.show()
                         regionBlurManager.hide()
                         Timber.d("$TAG FULLSCREEN BLUR fallback for $pkg (no specific regions)")
                     }
 
-                    // ROOT CAUSE FIX B (cont.): timer MUST advance whenever whole frame is
-                    // unsafe, regardless of whether specific tiles were found.
-                    // Previously onUnsafeDetected() was only called inside the isAnyUnsafe
-                    // branch — so if tiles were always clean (due to threshold Bug A), the
-                    // timer never moved and the app was NEVER blocked.
                     val shouldBlock = blurTracker.onUnsafeDetected(pkg)
                     val totalMs     = blurTracker.getTotalBlurMs(pkg)
 
@@ -456,13 +470,12 @@ class GuardianAccessibilityService : AccessibilityService() {
                     }
 
                 } else if (evalResult is DetectionResult.Whitelist) {
-                    // App is whitelisted — clear any stray blur immediately
                     if (regionBlurManager.isShowing) regionBlurManager.hide()
                     if (blurOverlayManager.isShowing) blurOverlayManager.hide()
                 }
 
             } else {
-                // ── SAFE content: hide ALL blur overlays ──
+                // Safe content: hide ALL blur overlays
                 val isAnyBlurShowing =
                     regionBlurManager.isShowing || blurOverlayManager.isShowing
                 if (isAnyBlurShowing && currentForegroundPkg == pkg) {
@@ -472,7 +485,6 @@ class GuardianAccessibilityService : AccessibilityService() {
                     Timber.d("$TAG blur hidden for $pkg — content cleared")
 
                     if (shouldBlock) {
-                        // Edge case: cumulative time tipped over 60s exactly as content cleared
                         Timber.w("$TAG CUMULATIVE BLOCK on safe-clear: $pkg")
                         blurTracker.resetApp(pkg)
                         val appName = getAppName(pkg)
@@ -489,7 +501,7 @@ class GuardianAccessibilityService : AccessibilityService() {
             Timber.e(e, "$TAG analyzeScreenshot error")
         } finally {
             try { result.hardwareBuffer?.close() } catch (_: Exception) {}
-            tileResult?.recycle()   // Only recycles if ownership was NOT transferred above
+            tileResult?.recycle()
             if (cropped != null && cropped !== full) cropped.recycle()
             full?.recycle()
             aiBusy = false
@@ -504,12 +516,6 @@ class GuardianAccessibilityService : AccessibilityService() {
         reason: BlockReason,
         detail: String
     ) {
-        // BUG FIX: Log event first on IO, then execute block on Main.
-        // Previous version launched a fire-and-forget serviceScope.launch(IO) for logging
-        // AND did withContext(Main) for blocking — this created a race where if the calling
-        // coroutine was cancelled (e.g. by stopAiScanLoop()), the IO log job would be
-        // orphaned and the withContext(Main) block call would be skipped silently.
-        // Fix: use sequential withContext() for both operations. Logging is fast (<1ms DB write).
         try {
             withContext(Dispatchers.IO) {
                 blockEventRepo.logEvent(
@@ -523,7 +529,6 @@ class GuardianAccessibilityService : AccessibilityService() {
             }
         } catch (e: Exception) {
             Timber.e(e, "$TAG log event failed")
-            // Continue to execute block even if logging failed
         }
 
         withContext(Dispatchers.Main) {
@@ -562,6 +567,44 @@ class GuardianAccessibilityService : AccessibilityService() {
             Timber.e(e, "$TAG loadSettings failed")
         }
     }
+
+    // ── System dimension helpers (BUG FIX #1 & #7) ────────────────────
+
+    /**
+     * Returns the ACTUAL status bar height in pixels.
+     * Uses system resource "status_bar_height" — exact on all devices.
+     * Falls back to 24dp if not found (should never happen on supported APIs).
+     */
+    private fun getStatusBarHeight(): Int {
+        return try {
+            val resourceId = resources.getIdentifier("status_bar_height", "dimen", "android")
+            if (resourceId > 0) resources.getDimensionPixelSize(resourceId)
+            else dpToPx(24)
+        } catch (e: Exception) {
+            Timber.w("$TAG getStatusBarHeight error: ${e.message}")
+            dpToPx(24)
+        }
+    }
+
+    /**
+     * Returns the ACTUAL navigation bar height in pixels.
+     * On gesture-navigation phones this is 0 (no nav bar). Handles that correctly.
+     * Falls back to 0 (gesture nav) if the resource is missing.
+     */
+    private fun getNavBarHeight(): Int {
+        return try {
+            // On Android 10+ gesture nav devices, navigation_bar_height = 0
+            val resourceId = resources.getIdentifier("navigation_bar_height", "dimen", "android")
+            if (resourceId > 0) resources.getDimensionPixelSize(resourceId)
+            else 0
+        } catch (e: Exception) {
+            Timber.w("$TAG getNavBarHeight error: ${e.message}")
+            0
+        }
+    }
+
+    private fun dpToPx(dp: Int): Int =
+        (dp * resources.displayMetrics.density + 0.5f).toInt()
 
     // ── Helpers ────────────────────────────────────────────────────────
 

@@ -26,7 +26,10 @@ data class SettingsUiState(
     val isStrictMode: Boolean           = false,
     val delayUnlockSeconds: Int         = 30,
     val aiThreshold: Float              = 0.40f,
-    val aiIntervalMs: Long              = 2500L,
+    // BUG FIX #11: Default was 2500L (old value). Updated to 1000L to match
+    // the new GuardianPreferences default. Prevents a flash of wrong value
+    // in UI before the first DataStore emission arrives.
+    val aiIntervalMs: Long              = 1_000L,
     val isPinSet: Boolean               = false,
     val snackMessage: String?           = null
 )
@@ -45,7 +48,6 @@ class SettingsViewModel @Inject constructor(
     private val prefs: GuardianPreferences,
     private val toggleAiDetectionUseCase: ToggleAiDetectionUseCase,
     private val toggleKeywordDetectionUseCase: ToggleKeywordDetectionUseCase,
-    // BUG FIX: inject the now-existing ToggleStrictModeUseCase
     private val toggleStrictModeUseCase: ToggleStrictModeUseCase,
     private val setDelayUnlockSecondsUseCase: SetDelayUnlockSecondsUseCase,
     private val isPinSetUseCase: IsPinSetUseCase
@@ -61,9 +63,7 @@ class SettingsViewModel @Inject constructor(
 
     private fun observePrefs() {
         viewModelScope.launch {
-            // BUG FIX: Was using vararg combine { values -> values[3] as Int } which
-            // can throw ClassCastException on ART when unboxing Integer/Float as Any?.
-            // Fix: use typed 5-arg combine overload with explicit parameter types.
+            // Typed 5-arg combine overload — avoids Array<*> unboxing ClassCastException on ART.
             combine(
                 prefs.isAiDetectionEnabled,
                 prefs.isKeywordDetectionEnabled,
@@ -103,13 +103,12 @@ class SettingsViewModel @Inject constructor(
 
     /**
      * Toggle AI detection — saves preference AND broadcasts to service.
-     * Broadcast is sent AFTER DataStore write completes to avoid race condition
-     * where service reads stale "false" value and immediately stops AI.
+     * Broadcast sent AFTER DataStore write completes (avoids race where service
+     * reads stale "false" and immediately stops AI).
      */
     fun toggleAi(enabled: Boolean, modelAvailable: Boolean = false) {
         viewModelScope.launch {
             toggleAiDetectionUseCase(enabled)
-            // Pref is now saved — safe to notify the service
             if (enabled && modelAvailable) {
                 notifyService(GuardianAccessibilityService.ACTION_RELOAD_MODEL)
                 _uiState.update { it.copy(snackMessage = "AI detection enabled ✓") }
@@ -117,7 +116,6 @@ class SettingsViewModel @Inject constructor(
                 notifyService(GuardianAccessibilityService.ACTION_REFRESH_RULES)
                 _uiState.update { it.copy(snackMessage = "AI detection disabled") }
             }
-            // If enabled but no model: SettingsActivity shows the warning, no broadcast needed
         }
     }
 
@@ -128,8 +126,6 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
-    // BUG FIX: toggleStrictMode() was missing — SettingsActivity had no way to call it.
-    // ToggleStrictModeUseCase now exists; this method saves the pref and notifies the service.
     fun toggleStrictMode(enabled: Boolean) {
         viewModelScope.launch {
             toggleStrictModeUseCase(enabled)
@@ -146,9 +142,7 @@ class SettingsViewModel @Inject constructor(
     fun setAiThreshold(v: Float) {
         viewModelScope.launch {
             prefs.setAiThreshold(v)
-            // BUG FIX: Previously did not notify the service.
-            // The service's aiThreshold var would stay stale until restart.
-            // Now sends REFRESH_RULES so loadSettings() re-reads the new value.
+            // Notify service so aiThreshold var is updated live (not just on restart)
             notifyService(GuardianAccessibilityService.ACTION_REFRESH_RULES)
         }
     }
@@ -206,18 +200,18 @@ class KeywordViewModel @Inject constructor(
     }
 
     fun addKeyword() {
-        val text = _uiState.value.inputText.trim()
-        if (text.length < 2) {
-            _uiState.update { it.copy(errorMessage = "Keyword must be at least 2 characters") }
-            return
-        }
         viewModelScope.launch {
+            val text = _uiState.value.inputText.trim()
+            if (text.length < 2) {
+                _uiState.update { it.copy(errorMessage = "Keyword must be at least 2 characters") }
+                return@launch
+            }
             val added = addKeywordUseCase(text)
             if (added) {
                 _uiState.update { it.copy(inputText = "", errorMessage = null) }
                 notifyService()
             } else {
-                _uiState.update { it.copy(errorMessage = "Could not add keyword") }
+                _uiState.update { it.copy(errorMessage = "Keyword too short") }
             }
         }
     }
@@ -237,7 +231,7 @@ class KeywordViewModel @Inject constructor(
                 }
             )
         } catch (e: Exception) {
-            Timber.e(e, "keyword notifyService")
+            Timber.e(e, "KeywordViewModel notifyService failed")
         }
     }
 }
@@ -248,59 +242,37 @@ class KeywordViewModel @Inject constructor(
 
 data class PinUiState(
     val input: String           = "",
-    val error: String?          = null,
-    val isVerified: Boolean     = false,
-    val isPinSet: Boolean       = false
+    val errorMessage: String?   = null,
+    val isSuccess: Boolean      = false
 )
 
 @HiltViewModel
 class PinViewModel @Inject constructor(
-    private val setupPinUseCase: SetupPinUseCase,
     private val verifyPinUseCase: VerifyPinUseCase,
+    private val setupPinUseCase: SetupPinUseCase,
     private val isPinSetUseCase: IsPinSetUseCase
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(PinUiState())
     val uiState: StateFlow<PinUiState> = _uiState.asStateFlow()
 
-    private val _confirmInput = MutableStateFlow("")
-
-    init {
-        _uiState.update { it.copy(isPinSet = isPinSetUseCase()) }
+    fun updateInput(input: String) {
+        _uiState.update { it.copy(input = input, errorMessage = null) }
     }
 
-    fun updateInput(pin: String) {
-        if (pin.length > 8 || !pin.all { it.isDigit() }) return
-        _uiState.update { it.copy(input = pin, error = null) }
-    }
-
-    fun updateConfirm(pin: String) {
-        if (pin.length > 8 || !pin.all { it.isDigit() }) return
-        _confirmInput.value = pin
-        _uiState.update { it.copy(error = null) }
-    }
-
-    fun setupPin() {
-        val result = setupPinUseCase(_uiState.value.input, _confirmInput.value)
-        when (result) {
-            PinSetupResult.Success      -> _uiState.update { it.copy(isVerified = true, isPinSet = true) }
-            PinSetupResult.TooShort     -> _uiState.update { it.copy(error = "PIN must be at least 4 digits") }
-            PinSetupResult.Mismatch     -> _uiState.update { it.copy(error = "PINs do not match") }
-            PinSetupResult.InvalidChars -> _uiState.update { it.copy(error = "PIN must be digits only") }
-            PinSetupResult.Failed       -> _uiState.update { it.copy(error = "Failed to save PIN") }
-        }
-    }
-
-    fun verifyPin() {
-        val correct = verifyPinUseCase(_uiState.value.input)
-        if (correct) {
-            _uiState.update { it.copy(isVerified = true, error = null) }
+    fun verify() {
+        val pin = _uiState.value.input
+        val ok = verifyPinUseCase(pin)
+        if (ok) {
+            _uiState.update { it.copy(isSuccess = true, errorMessage = null) }
         } else {
-            _uiState.update { it.copy(error = "Incorrect PIN", input = "") }
+            _uiState.update { it.copy(input = "", errorMessage = "Incorrect PIN") }
         }
     }
 
-    fun clearInput() {
-        _uiState.update { it.copy(input = "", error = null) }
+    fun isPinSet(): Boolean = isPinSetUseCase()
+
+    fun reset() {
+        _uiState.update { PinUiState() }
     }
 }
