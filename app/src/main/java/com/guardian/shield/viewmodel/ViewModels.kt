@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import com.guardian.shield.data.local.datastore.GuardianPreferences
 import com.guardian.shield.domain.model.KeywordRule
 import com.guardian.shield.domain.usecase.*
+import com.guardian.shield.service.detection.PinManager
 import com.guardian.shield.service.accessibility.GuardianAccessibilityService
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -241,9 +242,10 @@ class KeywordViewModel @Inject constructor(
 // ─────────────────────────────────────────────────────────────────────
 
 data class PinUiState(
-    val input: String           = "",
-    val errorMessage: String?   = null,
-    val isSuccess: Boolean      = false
+    val input: String       = "",
+    val confirm: String     = "",
+    val error: String?      = null,
+    val isVerified: Boolean = false
 )
 
 @HiltViewModel
@@ -257,16 +259,31 @@ class PinViewModel @Inject constructor(
     val uiState: StateFlow<PinUiState> = _uiState.asStateFlow()
 
     fun updateInput(input: String) {
-        _uiState.update { it.copy(input = input, errorMessage = null) }
+        _uiState.update { it.copy(input = input, error = null) }
     }
 
-    fun verify() {
+    fun updateConfirm(confirm: String) {
+        _uiState.update { it.copy(confirm = confirm, error = null) }
+    }
+
+    fun setupPin() {
+        val pin     = _uiState.value.input
+        val confirm = _uiState.value.confirm
+        when (setupPinUseCase(pin, confirm)) {
+            PinSetupResult.Success      -> _uiState.update { it.copy(isVerified = true, error = null) }
+            PinSetupResult.TooShort     -> _uiState.update { it.copy(error = "PIN must be at least ${PinManager.MIN_PIN_LENGTH} digits") }
+            PinSetupResult.Mismatch     -> _uiState.update { it.copy(error = "PINs do not match") }
+            PinSetupResult.InvalidChars -> _uiState.update { it.copy(error = "PIN must contain digits only") }
+            PinSetupResult.Failed       -> _uiState.update { it.copy(error = "Failed to save PIN. Try again.") }
+        }
+    }
+
+    fun verifyPin() {
         val pin = _uiState.value.input
-        val ok = verifyPinUseCase(pin)
-        if (ok) {
-            _uiState.update { it.copy(isSuccess = true, errorMessage = null) }
+        if (verifyPinUseCase(pin)) {
+            _uiState.update { it.copy(isVerified = true, error = null) }
         } else {
-            _uiState.update { it.copy(input = "", errorMessage = "Incorrect PIN") }
+            _uiState.update { it.copy(input = "", error = "Incorrect PIN") }
         }
     }
 
