@@ -5,6 +5,7 @@ import com.guardian.shield.data.local.datastore.GuardianPreferences
 import com.guardian.shield.data.repository.AppRuleRepository
 import com.guardian.shield.data.repository.BlockEventRepository
 import com.guardian.shield.data.repository.KeywordRepository
+import com.guardian.shield.service.blur.BlurOverlayManager
 import com.guardian.shield.service.blur.CumulativeBlurTracker
 import com.guardian.shield.service.blocker.BlockingEngine
 import com.guardian.shield.service.detection.AiDetector
@@ -23,7 +24,6 @@ interface AccessibilityServiceEntryPoint {
     fun keywordRepo(): KeywordRepository
     fun blockEventRepo(): BlockEventRepository
     fun prefs(): GuardianPreferences
-    // BlurOverlayManager is NOT injected — it's created manually in the
-    // AccessibilityService with the service as context (TYPE_ACCESSIBILITY_OVERLAY)
+    fun blurOverlayManager(): BlurOverlayManager
     fun cumulativeBlurTracker(): CumulativeBlurTracker
 }
