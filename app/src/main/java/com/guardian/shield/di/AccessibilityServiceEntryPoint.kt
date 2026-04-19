@@ -7,6 +7,8 @@ import com.guardian.shield.data.repository.BlockEventRepository
 import com.guardian.shield.data.repository.KeywordRepository
 import com.guardian.shield.service.blur.BlurOverlayManager
 import com.guardian.shield.service.blur.CumulativeBlurTracker
+import com.guardian.shield.service.blur.RegionBlurOverlayManager
+import com.guardian.shield.service.blur.TileAnalyzer
 import com.guardian.shield.service.blocker.BlockingEngine
 import com.guardian.shield.service.detection.AiDetector
 import com.guardian.shield.service.detection.RulesEngine
@@ -26,4 +28,6 @@ interface AccessibilityServiceEntryPoint {
     fun prefs(): GuardianPreferences
     fun blurOverlayManager(): BlurOverlayManager
     fun cumulativeBlurTracker(): CumulativeBlurTracker
+    fun regionBlurOverlayManager(): RegionBlurOverlayManager
+    fun tileAnalyzer(): TileAnalyzer
 }
