@@ -19,6 +19,7 @@ import com.guardian.shield.di.AccessibilityServiceEntryPoint
 import com.guardian.shield.domain.model.BlockEvent
 import com.guardian.shield.domain.model.BlockReason
 import com.guardian.shield.domain.model.DetectionResult
+import com.guardian.shield.service.blur.BlurOverlayManager
 import com.guardian.shield.service.blur.CumulativeBlurTracker
 import com.guardian.shield.service.blur.RegionBlurOverlayManager
 import com.guardian.shield.service.blur.TileAnalyzer
@@ -64,6 +65,7 @@ class GuardianAccessibilityService : AccessibilityService() {
     private lateinit var blockEventRepo: BlockEventRepository
     private lateinit var prefs: GuardianPreferences
     private lateinit var blurTracker: CumulativeBlurTracker
+    private lateinit var blurOverlayManager: BlurOverlayManager
     private lateinit var regionBlurManager: RegionBlurOverlayManager
     private lateinit var tileAnalyzer: TileAnalyzer
 
@@ -117,6 +119,7 @@ class GuardianAccessibilityService : AccessibilityService() {
             blockEventRepo = entryPoint.blockEventRepo()
             prefs = entryPoint.prefs()
             blurTracker = entryPoint.cumulativeBlurTracker()
+            blurOverlayManager = entryPoint.blurOverlayManager()
             regionBlurManager = entryPoint.regionBlurOverlayManager()
             tileAnalyzer = entryPoint.tileAnalyzer()
             isInjected = true
@@ -152,17 +155,18 @@ class GuardianAccessibilityService : AccessibilityService() {
             if (!SYSTEM_UI_SKIP.contains(pkg) && !rulesEngine.isSystemUi(pkg)) {
                 val prev = currentForegroundPkg
                 if (prev != pkg && prev.isNotBlank()) {
-                    // App switched — hide region blur and notify tracker
+                    // App switched — hide ALL blur overlays and notify tracker
                     regionBlurManager.hide()
+                    blurOverlayManager.hide()
                     blurTracker.onAppChanged(prev, pkg)
                     Timber.d("Guardian_Service app changed: $prev → $pkg")
                 }
                 currentForegroundPkg = pkg
+                // BUG FIX: handleAppEvent was in a duplicate second if-block, causing it to
+                // fire for system UI packages (keyboard, IME, etc.) unnecessarily.
+                // Moved here so it only fires for real app foreground changes.
+                handleAppEvent(pkg)
             }
-        }
-
-        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            handleAppEvent(pkg)
         }
 
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ||
@@ -178,7 +182,8 @@ class GuardianAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         stopAiScanLoop()
         if (isInjected) {
-            regionBlurManager.hide()   // Clean up overlay if service dies
+            regionBlurManager.hide()
+            blurOverlayManager.hide()   // Clean up both overlays if service dies
         }
         serviceScope.cancel()
         try { unregisterReceiver(refreshReceiver) } catch (_: Exception) {}
@@ -318,6 +323,18 @@ class GuardianAccessibilityService : AccessibilityService() {
     private fun captureAndAnalyze() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
         aiBusy = true
+
+        // Safety watchdog: if takeScreenshot never calls back (rare system failure),
+        // aiBusy would stay true forever and the scan loop would be permanently frozen.
+        // Reset after 15s to guarantee forward progress.
+        serviceScope.launch {
+            delay(15_000)
+            if (aiBusy) {
+                Timber.w("$TAG aiBusy watchdog fired — resetting (screenshot callback lost)")
+                aiBusy = false
+            }
+        }
+
         try {
             takeScreenshot(
                 Display.DEFAULT_DISPLAY,
@@ -391,7 +408,6 @@ class GuardianAccessibilityService : AccessibilityService() {
                 if (evalResult is DetectionResult.Blur) {
 
                     // ── Step 2: Tile analysis — find WHICH regions are unsafe ──
-                    // Runs 12 extra inferences but only when the whole frame is already flagged.
                     tileResult = tileAnalyzer.analyzeTiles(
                         croppedBitmap  = cropped,
                         fullBitmap     = full,
@@ -400,48 +416,60 @@ class GuardianAccessibilityService : AccessibilityService() {
                     )
 
                     if (tileResult.isAnyUnsafe) {
-                        // ── REGION BLUR: show pixelated patches only on unsafe tiles ──
-                        // showRegions() takes ownership of the bitmaps — don't recycle tileResult
+                        // ── REGION BLUR: pixelated patches on specific unsafe tiles ──
                         regionBlurManager.showRegions(tileResult.unsafeTiles)
-                        tileResult = null   // ownership transferred
-
-                        val shouldBlock = blurTracker.onUnsafeDetected(pkg)
-                        val totalMs     = blurTracker.getTotalBlurMs(pkg)
-
-                        if (shouldBlock) {
-                            // Cumulative 60s reached → hard block
-                            Timber.w("$TAG CUMULATIVE BLOCK: $pkg — ${totalMs}ms blur accumulated")
-                            regionBlurManager.hide()
-                            blurTracker.resetApp(pkg)
-                            val appName = getAppName(pkg)
-                            logAndBlock(
-                                pkg, appName,
-                                BlockReason.AI_DETECTED,
-                                "Blur timeout: ${totalMs / 1000}s of sensitive content"
-                            )
-                        } else {
-                            val remainSec = blurTracker.remainingMs(pkg) / 1000
-                            Timber.d("$TAG REGION BLUR for $pkg — ${totalMs / 1000}s / 60s (${remainSec}s to block)")
-                        }
-
+                        tileResult = null   // ownership transferred to showRegions()
+                        blurOverlayManager.hide()   // dismiss fallback if it was showing
+                        Timber.d("$TAG REGION BLUR shown for $pkg")
                     } else {
-                        // Overall frame flagged but no specific unsafe tiles found
-                        // (can happen if content is borderline or spread across tiles)
-                        // → keep any existing blur visible but don't re-trigger timer
-                        Timber.d("$TAG overall unsafe but no specific tiles — leaving blur state unchanged")
+                        // ROOT CAUSE FIX B: whole frame flagged but no specific tiles identified.
+                        // Previously: did nothing — timer never advanced, blur never showed.
+                        // Fix: show full-screen blur as fallback so the user sees SOMETHING,
+                        // and the timer still advances toward the block threshold.
+                        blurOverlayManager.show()
+                        regionBlurManager.hide()
+                        Timber.d("$TAG FULLSCREEN BLUR fallback for $pkg (no specific regions)")
+                    }
+
+                    // ROOT CAUSE FIX B (cont.): timer MUST advance whenever whole frame is
+                    // unsafe, regardless of whether specific tiles were found.
+                    // Previously onUnsafeDetected() was only called inside the isAnyUnsafe
+                    // branch — so if tiles were always clean (due to threshold Bug A), the
+                    // timer never moved and the app was NEVER blocked.
+                    val shouldBlock = blurTracker.onUnsafeDetected(pkg)
+                    val totalMs     = blurTracker.getTotalBlurMs(pkg)
+
+                    if (shouldBlock) {
+                        Timber.w("$TAG CUMULATIVE BLOCK: $pkg — ${totalMs}ms blur accumulated")
+                        regionBlurManager.hide()
+                        blurOverlayManager.hide()
+                        blurTracker.resetApp(pkg)
+                        val appName = getAppName(pkg)
+                        logAndBlock(
+                            pkg, appName,
+                            BlockReason.AI_DETECTED,
+                            "Blur timeout: ${totalMs / 1000}s of sensitive content"
+                        )
+                    } else {
+                        val remainSec = blurTracker.remainingMs(pkg) / 1000
+                        Timber.d("$TAG blur timer: ${totalMs / 1000}s / 60s (${remainSec}s to block)")
                     }
 
                 } else if (evalResult is DetectionResult.Whitelist) {
                     // App is whitelisted — clear any stray blur immediately
                     if (regionBlurManager.isShowing) regionBlurManager.hide()
+                    if (blurOverlayManager.isShowing) blurOverlayManager.hide()
                 }
 
             } else {
-                // ── SAFE content: hide all blur patches ──
-                if (regionBlurManager.isShowing && currentForegroundPkg == pkg) {
+                // ── SAFE content: hide ALL blur overlays ──
+                val isAnyBlurShowing =
+                    regionBlurManager.isShowing || blurOverlayManager.isShowing
+                if (isAnyBlurShowing && currentForegroundPkg == pkg) {
                     val shouldBlock = blurTracker.onSafeDetected(pkg)
                     regionBlurManager.hide()
-                    Timber.d("$TAG REGION BLUR hidden for $pkg — content cleared")
+                    blurOverlayManager.hide()
+                    Timber.d("$TAG blur hidden for $pkg — content cleared")
 
                     if (shouldBlock) {
                         // Edge case: cumulative time tipped over 60s exactly as content cleared

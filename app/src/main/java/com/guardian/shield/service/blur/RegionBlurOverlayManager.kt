@@ -45,7 +45,7 @@ class RegionBlurOverlayManager @Inject constructor(
     @Volatile var isShowing = false
         private set
 
-    private var blurView: RegionBlurView? = null
+    @Volatile private var blurView: RegionBlurView? = null
     private val mainHandler = Handler(Looper.getMainLooper())
 
     // ── Public API ─────────────────────────────────────────────────────

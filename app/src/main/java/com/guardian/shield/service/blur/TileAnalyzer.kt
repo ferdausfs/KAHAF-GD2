@@ -31,6 +31,13 @@ class TileAnalyzer @Inject constructor(
         const val COLS = 3       // 3 columns
         const val ROWS = 4       // 4 rows  →  12 tiles total
         private const val PIXELATE_FACTOR = 14   // higher = more aggressive blur
+
+        // Tiles are 1/12 of the screen — the AI model scores them much lower than a
+        // whole-frame inference even when unsafe content is present. Using the same
+        // threshold means tiles almost never get flagged individually.
+        // Fix: lower the per-tile threshold to 55% of the main threshold.
+        // e.g. main = 0.40f → tile threshold = 0.22f
+        const val TILE_THRESHOLD_FACTOR = 0.55f
     }
 
     data class TileAnalysisResult(
@@ -65,6 +72,11 @@ class TileAnalyzer @Inject constructor(
             return TileAnalysisResult(emptyList(), 0f)
         }
 
+        // Per-tile threshold is lower than the whole-frame threshold.
+        // Tiles are 1/12 of the screen, so the model scores them lower even when
+        // unsafe content is present. TILE_THRESHOLD_FACTOR corrects for this.
+        val tileThreshold = threshold * TILE_THRESHOLD_FACTOR
+
         val unsafeTiles = mutableListOf<Pair<Rect, Bitmap>>()
         var maxScore = 0f
 
@@ -88,7 +100,7 @@ class TileAnalyzer @Inject constructor(
                     // Skip blank / all-black tiles (loading screens, etc.)
                     if (aiDetector.shouldSkipFrame(tile)) continue
 
-                    val result = aiDetector.classify(tile, threshold)
+                    val result = aiDetector.classify(tile, tileThreshold)
                     if (result.unsafeScore > maxScore) maxScore = result.unsafeScore
 
                     if (result.isUnsafe) {

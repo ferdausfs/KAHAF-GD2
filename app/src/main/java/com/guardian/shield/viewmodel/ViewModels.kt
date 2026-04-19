@@ -146,6 +146,10 @@ class SettingsViewModel @Inject constructor(
     fun setAiThreshold(v: Float) {
         viewModelScope.launch {
             prefs.setAiThreshold(v)
+            // BUG FIX: Previously did not notify the service.
+            // The service's aiThreshold var would stay stale until restart.
+            // Now sends REFRESH_RULES so loadSettings() re-reads the new value.
+            notifyService(GuardianAccessibilityService.ACTION_REFRESH_RULES)
         }
     }
 
