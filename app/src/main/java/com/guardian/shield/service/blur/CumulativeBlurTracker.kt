@@ -19,10 +19,25 @@ import javax.inject.Singleton
  *   onAppChanged(pkg) → ends any active session for old pkg.
  *     Resets state for new pkg (fresh start per visit).
  *
- * BUG FIX #5: BlurState fields are now `@Volatile` to prevent visibility issues
+ * BUG FIX #5: BlurState fields are @Volatile to prevent visibility issues
  * when accessed from both the AI scan coroutine (Dispatchers.Default) and
- * accessibility event callbacks concurrently. Methods are @Synchronized to
- * prevent TOCTOU (time-of-check-time-of-use) races.
+ * accessibility event callbacks concurrently. Write methods are @Synchronized
+ * to prevent TOCTOU races.
+ *
+ * BUG FIX D: getTotalBlurMs() and isBlurActive() are now also @Synchronized.
+ *
+ * Old code left these two functions unsynchronized because they were "only
+ * used for logging". But:
+ *   1. getTotalBlurMs() reads TWO fields (totalMs + sessionStartMs) as a
+ *      compound operation. Without a lock, a concurrent onSafeDetected() call
+ *      could set sessionStartMs=null and increment totalMs between the two
+ *      reads, producing a result that double-counts (or ignores) part of the
+ *      current session. The result fed into the "Xms / 60s" log line would be
+ *      misleading and hard to debug.
+ *   2. isBlurActive() reads sessionStartMs once — a single volatile read is
+ *      atomic, but it's exposed as API so callers may rely on it being
+ *      consistent with the write methods. Synchronizing it costs nothing and
+ *      prevents subtle bugs if usage ever expands to decision paths.
  */
 @Singleton
 class CumulativeBlurTracker @Inject constructor() {
@@ -34,9 +49,9 @@ class CumulativeBlurTracker @Inject constructor() {
 
     /**
      * Per-app blur state.
-     * @Synchronized methods on the outer class protect access.
-     * Fields marked @Volatile for cross-thread visibility even outside synchronized blocks
-     * (e.g. getTotalBlurMs() / remainingMs() used for logging only, not decisions).
+     * All access is guarded by the outer class lock (@Synchronized methods).
+     * @Volatile on individual fields provides cross-thread visibility as an
+     * extra safety net, but the synchronized methods are the primary guard.
      */
     private class BlurState {
         @Volatile var totalMs: Long = 0L
@@ -108,14 +123,31 @@ class CumulativeBlurTracker @Inject constructor() {
         Timber.d("$TAG [$pkg] state reset")
     }
 
-    /** Current total blur ms (including active session if running). For logging only. */
+    /**
+     * Current total blur ms (including active session if running).
+     *
+     * BUG FIX D: Now @Synchronized.
+     * Old code read totalMs and sessionStartMs separately without a lock. A
+     * concurrent onSafeDetected() could commit the session (adding to totalMs,
+     * clearing sessionStartMs) between our two reads, causing us to add the
+     * session duration twice. With the lock, both fields are read atomically.
+     */
+    @Synchronized
     fun getTotalBlurMs(pkg: String): Long {
         val state = states[pkg] ?: return 0L
         val sessionMs = state.sessionStartMs?.let { System.currentTimeMillis() - it } ?: 0L
         return state.totalMs + sessionMs
     }
 
-    /** Whether a blur session is currently active for this package. */
+    /**
+     * Whether a blur session is currently active for this package.
+     *
+     * BUG FIX D: Now @Synchronized.
+     * Although a single volatile read is technically atomic, synchronizing here
+     * ensures consistency with the write methods and future-proofs against
+     * callers that rely on this returning a value coherent with getTotalBlurMs().
+     */
+    @Synchronized
     fun isBlurActive(pkg: String): Boolean = states[pkg]?.sessionStartMs != null
 
     /** Remaining ms before block threshold is reached. */

@@ -48,12 +48,33 @@ class RulesEngine @Inject constructor() {
     }
 
     // In-memory caches — refreshed via refreshCaches()
-    @Volatile private var blockedPackages: Set<String>    = emptySet()
+    @Volatile private var blockedPackages: Set<String>     = emptySet()
     @Volatile private var whitelistedPackages: Set<String> = emptySet()
-    @Volatile private var activeKeywords: List<String>    = emptyList()
-    @Volatile private var isKeywordDetectionOn: Boolean   = true
-    @Volatile private var isProtectionEnabled: Boolean    = true
-    @Volatile private var isStrictMode: Boolean           = false
+    @Volatile private var isKeywordDetectionOn: Boolean    = true
+    @Volatile private var isProtectionEnabled: Boolean     = true
+    @Volatile private var isStrictMode: Boolean            = false
+
+    /**
+     * BUG FIX C: Pre-compiled keyword patterns with word boundaries.
+     *
+     * Old code stored raw strings and used String.contains() which caused
+     * false positives — e.g. keyword "sex" would match "Sussex", "Essex",
+     * "assessment"; keyword "ass" would match "class", "glass", "assistance".
+     *
+     * Fix: On refreshKeywords(), compile each keyword into a Regex with \\b
+     * (word boundary) anchors so only whole-word matches trigger a block.
+     * Patterns are compiled ONCE and reused on every text scan — no allocation
+     * per scan cycle unlike the old approach.
+     *
+     * Multi-word keywords (e.g. "adult content") also benefit from this since
+     * \\b anchors the start and end of the whole phrase.
+     */
+    private data class KeywordPattern(
+        val keyword: String,   // original for logging
+        val pattern: Regex     // pre-compiled with word boundaries
+    )
+
+    @Volatile private var keywordPatterns: List<KeywordPattern> = emptyList()
 
     // ── Cache refresh (called by service on startup + DB change) ──────
 
@@ -67,9 +88,20 @@ class RulesEngine @Inject constructor() {
         Timber.d("$TAG whitelist refreshed: ${packages.size} apps")
     }
 
+    /**
+     * BUG FIX C: Compile each keyword into a word-boundary Regex.
+     * Stored as List<KeywordPattern> instead of List<String>.
+     */
     fun refreshKeywords(keywords: List<String>) {
-        activeKeywords = keywords.map { it.lowercase().trim() }
-        Timber.d("$TAG keywords refreshed: ${keywords.size} keywords")
+        keywordPatterns = keywords.map { kw ->
+            val normalized = kw.lowercase().trim()
+            KeywordPattern(
+                keyword = normalized,
+                // \\b = word boundary — prevents "sex" matching "Sussex"
+                pattern = Regex("\\b${Regex.escape(normalized)}\\b")
+            )
+        }
+        Timber.d("$TAG keywords refreshed: ${keywords.size} keywords (pre-compiled with word boundaries)")
     }
 
     fun setKeywordDetectionEnabled(enabled: Boolean) { isKeywordDetectionOn = enabled }
@@ -109,6 +141,10 @@ class RulesEngine @Inject constructor() {
     /**
      * Evaluate screen text for keyword matches.
      * Only called if keyword detection is enabled and app is not whitelisted.
+     *
+     * BUG FIX C: Uses pre-compiled word-boundary patterns instead of contains().
+     * Each keyword is checked with Regex("\\b<keyword>\\b") so only whole-word
+     * matches trigger a block. Patterns are compiled in refreshKeywords(), not here.
      */
     fun evaluateText(packageName: String, text: String): DetectionResult {
         if (!isProtectionEnabled) return DetectionResult.Allow
@@ -117,13 +153,13 @@ class RulesEngine @Inject constructor() {
         if (packageName in whitelistedPackages) return DetectionResult.Whitelist
 
         val lower = text.lowercase()
-        val hit = activeKeywords.firstOrNull { kw ->
-            lower.contains(kw)
+        val hit = keywordPatterns.firstOrNull { kp ->
+            kp.pattern.containsMatchIn(lower)
         }
 
         return if (hit != null) {
-            Timber.d("$TAG BLOCK (keyword '$hit'): $packageName")
-            DetectionResult.Block(BlockReason.KEYWORD_DETECTED, hit)
+            Timber.d("$TAG BLOCK (keyword '${hit.keyword}'): $packageName")
+            DetectionResult.Block(BlockReason.KEYWORD_DETECTED, hit.keyword)
         } else {
             DetectionResult.Allow
         }

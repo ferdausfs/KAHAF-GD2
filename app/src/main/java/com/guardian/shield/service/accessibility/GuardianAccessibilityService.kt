@@ -74,16 +74,17 @@ class GuardianAccessibilityService : AccessibilityService() {
     @Volatile private var currentForegroundPkg = ""
     @Volatile private var aiEnabled = false
     @Volatile private var aiThreshold = 0.40f
-    @Volatile private var aiIntervalMs = 2_500L
+    // BUG FIX A: Was 2_500L — inconsistent with DataStore default (1_000L) and
+    // SettingsUiState default (1_000L). Until loadSettings() fires on startup,
+    // the scan loop was using a stale 2.5s interval instead of 1s.
+    @Volatile private var aiIntervalMs = 1_000L
     @Volatile private var aiScanJob: Job? = null
     @Volatile private var aiBusy = false
     @Volatile private var isInjected = false
 
     private var textDebounceJob: Job? = null
 
-    // ── BUG FIX #2: Watchdog job stored so it can be cancelled when scan completes
-    // Old code: watchdog never cancelled → fired during NEXT scan → reset aiBusy=true
-    // Fix: cancel watchdog in analyzeScreenshot() finally block
+    // BUG FIX #2: Watchdog job stored so it can be cancelled when scan completes.
     @Volatile private var watchdogJob: Job? = null
 
     // ── Receiver (handles both REFRESH_RULES and RELOAD_MODEL) ────────
@@ -172,8 +173,6 @@ class GuardianAccessibilityService : AccessibilityService() {
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ||
             event.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED) {
             // BUG FIX #3: Use currentForegroundPkg, NOT the event's package.
-            // TYPE_WINDOW_CONTENT_CHANGED can fire from keyboards, notifications, overlays —
-            // the event's package is NOT the foreground app. Always scan the actual foreground app.
             val scanPkg = currentForegroundPkg.takeIf { it.isNotBlank() } ?: return
             if (!SYSTEM_UI_SKIP.contains(scanPkg) && !rulesEngine.isSystemUi(scanPkg)) {
                 debounceTextScan(scanPkg)
@@ -330,10 +329,7 @@ class GuardianAccessibilityService : AccessibilityService() {
     private fun captureAndAnalyze() {
         aiBusy = true
 
-        // BUG FIX #2: Store watchdog job reference so we can cancel it when the
-        // screenshot analysis completes normally. Old code never cancelled the watchdog,
-        // so an old watchdog could fire during the NEXT scan cycle and reset aiBusy=true,
-        // permanently freezing the scan loop.
+        // BUG FIX #2: Store watchdog job so we can cancel it when analysis completes.
         watchdogJob?.cancel()
         watchdogJob = serviceScope.launch {
             delay(15_000)
@@ -351,8 +347,6 @@ class GuardianAccessibilityService : AccessibilityService() {
                     override fun onSuccess(result: ScreenshotResult) {
                         serviceScope.launch(Dispatchers.Default) {
                             analyzeScreenshot(result)
-                            // analyzeScreenshot sets aiBusy=false in its finally block
-                            // Cancel watchdog now that the analysis is done
                             watchdogJob?.cancel()
                             watchdogJob = null
                         }
@@ -384,7 +378,9 @@ class GuardianAccessibilityService : AccessibilityService() {
         try {
             val hb = result.hardwareBuffer ?: run {
                 Timber.w("$TAG analyzeScreenshot: null hardwareBuffer")
-                aiBusy = false
+                // BUG FIX B: Removed redundant aiBusy = false here.
+                // The finally block always runs and handles aiBusy = false.
+                // Having it here AND in finally was confusing and redundant.
                 return
             }
             val hwBmp = Bitmap.wrapHardwareBuffer(hb, result.colorSpace)
@@ -392,17 +388,14 @@ class GuardianAccessibilityService : AccessibilityService() {
             hwBmp?.recycle()
             if (full == null) {
                 Timber.w("$TAG analyzeScreenshot: failed to copy bitmap")
-                aiBusy = false
+                // BUG FIX B: Removed redundant aiBusy = false — finally handles it.
                 return
             }
 
             val w = full.width
             val h = full.height
 
-            // BUG FIX #1 & #7: Use ACTUAL status/nav bar height instead of percentage guess.
-            // Old code: topCut = (h * 0.07f).toInt()
-            //   On 2400px phone: estimated=168px vs actual=72px → 96px error → blur off-position!
-            // New code: query real system dimension. Fallback to safe default if not available.
+            // BUG FIX #1 & #7: Use ACTUAL status/nav bar height.
             val topCut = getStatusBarHeight()
             val botCut = getNavBarHeight()
 
@@ -415,7 +408,7 @@ class GuardianAccessibilityService : AccessibilityService() {
 
             if (aiDetector.shouldSkipFrame(cropped)) {
                 Timber.d("$TAG AI: skipping frame (uniform/black)")
-                aiBusy = false
+                // BUG FIX B: Removed redundant aiBusy = false — finally handles it.
                 return
             }
 
@@ -431,7 +424,6 @@ class GuardianAccessibilityService : AccessibilityService() {
                 if (evalResult is DetectionResult.Blur) {
 
                     // ── Step 2: Tile analysis — find WHICH regions are unsafe ──
-                    // screenOffsetY = topCut so tile rects use correct physical screen coords
                     tileResult = tileAnalyzer.analyzeTiles(
                         croppedBitmap  = cropped,
                         fullBitmap     = full,
@@ -504,7 +496,7 @@ class GuardianAccessibilityService : AccessibilityService() {
             tileResult?.recycle()
             if (cropped != null && cropped !== full) cropped.recycle()
             full?.recycle()
-            aiBusy = false
+            aiBusy = false   // single canonical location — always runs
         }
     }
 
@@ -570,11 +562,6 @@ class GuardianAccessibilityService : AccessibilityService() {
 
     // ── System dimension helpers (BUG FIX #1 & #7) ────────────────────
 
-    /**
-     * Returns the ACTUAL status bar height in pixels.
-     * Uses system resource "status_bar_height" — exact on all devices.
-     * Falls back to 24dp if not found (should never happen on supported APIs).
-     */
     private fun getStatusBarHeight(): Int {
         return try {
             val resourceId = resources.getIdentifier("status_bar_height", "dimen", "android")
@@ -586,14 +573,8 @@ class GuardianAccessibilityService : AccessibilityService() {
         }
     }
 
-    /**
-     * Returns the ACTUAL navigation bar height in pixels.
-     * On gesture-navigation phones this is 0 (no nav bar). Handles that correctly.
-     * Falls back to 0 (gesture nav) if the resource is missing.
-     */
     private fun getNavBarHeight(): Int {
         return try {
-            // On Android 10+ gesture nav devices, navigation_bar_height = 0
             val resourceId = resources.getIdentifier("navigation_bar_height", "dimen", "android")
             if (resourceId > 0) resources.getDimensionPixelSize(resourceId)
             else 0
