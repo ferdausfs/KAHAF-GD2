@@ -1,5 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Bulldog Blocker</string>
-    <string name="accessibility_service_label">Bulldog Content Blocker</string>
-    <string name="accessibility_service_description">Real-time adult content blocking — monitors screen and browser URLs to protect against harmful content.</string>
+    <string name="app_name">Guardian Shield</string>
+    <string name="accessibility_service_label">Guardian Content Blocker</string>
+    <string name="accessibility_service_description">Guardian Shield monitors screen content to block adult and distracting content. It does not collect or transmit any data.</string>
+    <string name="protection_active">🛡️ Protection Active</string>
+    <string name="protection_inactive">⚠️ Protection Inactive</string>
+    <string name="blocked_for_protection">Blocked for your protection</string>
+    <string name="enter_pin">Enter PIN</string>
+    <string name="incorrect_pin">Incorrect PIN</string>
+    <string name="pin_saved">PIN saved successfully</string>
 </resources>

@@ -3,67 +3,83 @@
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- Permissions -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.BIND_ACCESSIBILITY_SERVICE" />
-    <uses-permission android:name="android.permission.BIND_DEVICE_ADMIN" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
-        android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <uses-permission android:name="android.permission.USE_FINGERPRINT" />
+    <!-- BUG FIX: Required on Android 13+ (API 33) to show foreground service notification.
+         Without this, the notification is silently blocked and the OS can kill the
+         foreground service, causing the accessibility service to stop. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
+        android:name=".GuardianApplication"
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"
-        android:theme="@style/Theme.BulldogBlocker"
+        android:theme="@style/Theme.GuardianShield"
         android:supportsRtl="true"
         tools:replace="android:allowBackup">
 
+        <!-- Main Entry -->
         <activity
-            android:name=".ui.MainActivity"
+            android:name=".ui.dashboard.MainActivity"
             android:exported="true"
-            android:launchMode="singleTop">
+            android:launchMode="singleTop"
+            android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
 
+        <!-- Settings (PIN protected) -->
         <activity
-            android:name=".ui.UninstallDelayActivity"
+            android:name=".ui.settings.SettingsActivity"
+            android:exported="false"
+            android:parentActivityName=".ui.dashboard.MainActivity" />
+
+        <!-- PIN Setup / Change -->
+        <activity
+            android:name=".ui.setup.PinSetupActivity"
+            android:exported="false" />
+
+        <!-- PIN Verify entry gate -->
+        <activity
+            android:name=".ui.setup.PinVerifyActivity"
+            android:exported="false"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true" />
+
+        <!-- Block overlay screen -->
+        <activity
+            android:name=".ui.overlay.BlockOverlayActivity"
             android:exported="false"
             android:showWhenLocked="true"
             android:turnScreenOn="true"
-            android:theme="@style/Theme.BulldogBlocker.Fullscreen" />
+            android:launchMode="singleTop"
+            android:excludeFromRecents="true"
+            android:theme="@style/Theme.GuardianShield.Fullscreen" />
 
+        <!-- Delay unlock screen -->
         <activity
-            android:name=".ui.BlockScreenActivity"
+            android:name=".ui.unlock.DelayUnlockActivity"
             android:exported="false"
             android:showWhenLocked="true"
             android:turnScreenOn="true"
-            android:theme="@style/Theme.BulldogBlocker.Fullscreen" />
+            android:theme="@style/Theme.GuardianShield.Fullscreen" />
 
-        <receiver
-            android:name=".admin.DeviceAdminReceiver"
-            android:exported="true"
-            android:permission="android.permission.BIND_DEVICE_ADMIN">
-            <meta-data
-                android:name="android.app.device_admin"
-                android:resource="@xml/device_admin" />
-            <intent-filter>
-                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
-                <action android:name="android.app.action.DEVICE_ADMIN_DISABLED" />
-                <action android:name="android.app.action.DEVICE_ADMIN_DISABLE_REQUESTED" />
-            </intent-filter>
-        </receiver>
-
+        <!-- Accessibility Service -->
         <service
-            android:name=".service.BlockerAccessibilityService"
+            android:name=".service.accessibility.GuardianAccessibilityService"
             android:exported="true"
             android:label="@string/accessibility_service_label"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
@@ -72,30 +88,28 @@
             </intent-filter>
             <meta-data
                 android:name="android.accessibilityservice"
-                android:resource="@xml/accessibility_service" />
+                android:resource="@xml/accessibility_service_config" />
         </service>
 
+        <!-- Foreground watchdog service -->
+        <!-- BUG FIX: stopWithTask="false" যোগ করা হয়েছে।
+             ছাড়া: user recents থেকে app swipe করলে service kill হয়।
+             সহ: task destroy হলেও service চলতে থাকে। START_STICKY + এই flag মিলে
+             service reliably alive থাকে। -->
         <service
-            android:name=".service.BlockerForegroundService"
+            android:name=".service.blocker.GuardianForegroundService"
             android:exported="false"
+            android:stopWithTask="false"
             android:foregroundServiceType="dataSync" />
 
-        <!--
-            v7 BUG FIX: android:permission সরানো হয়েছে।
-            আগে: android:permission="com.ftt.bulldogblocker.RESTART_PERMISSION" থাকায়
-                 Android system BOOT_COMPLETED পাঠাতে পারত না — system ওই permission hold করে না।
-                 ফলে phone restart-এ app কখনো auto-start হতো না।
-            এখন: permission ছাড়া receiver → system BOOT_COMPLETED deliver করতে পারে।
-                 RESTART_SERVICE: explicit Intent (component specified) দিয়ে পাঠানো হয়,
-                 তাই অন্য app implicit broadcast দিয়ে target করতে পারে না।
-        -->
+        <!-- Boot receiver -->
         <receiver
             android:name=".receiver.BootReceiver"
             android:exported="true">
             <intent-filter android:priority="999">
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
-                <action android:name="com.ftt.bulldogblocker.RESTART_SERVICE" />
+                <action android:name="com.guardian.shield.RESTART_SERVICE" />
             </intent-filter>
         </receiver>
 

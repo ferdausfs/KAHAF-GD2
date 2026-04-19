@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- app/src/main/res/layout/layout_numpad.xml -->
+<!-- FIX #3: Removed unsupported layout_columnWeight from Space -->
+<GridLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:columnCount="3"
+    android:rowCount="4"
+    android:layout_gravity="center">
+
+    <!-- Row 1: 1 2 3 -->
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btn1"
+        style="@style/NumpadButton"
+        android:text="1" />
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btn2"
+        style="@style/NumpadButton"
+        android:text="2" />
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btn3"
+        style="@style/NumpadButton"
+        android:text="3" />
+
+    <!-- Row 2: 4 5 6 -->
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btn4"
+        style="@style/NumpadButton"
+        android:text="4" />
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btn5"
+        style="@style/NumpadButton"
+        android:text="5" />
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btn6"
+        style="@style/NumpadButton"
+        android:text="6" />
+
+    <!-- Row 3: 7 8 9 -->
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btn7"
+        style="@style/NumpadButton"
+        android:text="7" />
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btn8"
+        style="@style/NumpadButton"
+        android:text="8" />
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btn9"
+        style="@style/NumpadButton"
+        android:text="9" />
+
+    <!-- Row 4: empty 0 backspace -->
+    <Space
+        android:layout_width="72dp"
+        android:layout_height="72dp" />
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btn0"
+        style="@style/NumpadButton"
+        android:text="0" />
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btn_backspace"
+        style="@style/NumpadButton"
+        android:text="⌫"
+        android:textSize="20sp" />
+
+</GridLayout>

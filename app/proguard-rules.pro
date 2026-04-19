@@ -1,32 +1,37 @@
-# ─── TensorFlow Lite ────────────────────────────────────────────────────────
-# Keep all TFLite classes to prevent release build crashes
--keep class org.tensorflow.lite.** { *; }
--keep class org.tensorflow.lite.gpu.** { *; }
--keep class org.tensorflow.lite.support.** { *; }
--dontwarn org.tensorflow.lite.**
--dontwarn org.tensorflow.lite.support.**
+# Guardian Shield ProGuard Rules
 
-# FIX: Keep TFLite native methods (JNI) — without this, release minify strips them
--keepclasseswithmembernames class * {
-    native <methods>;
+# Keep TFLite
+-keep class org.tensorflow.lite.** { *; }
+-keep class org.tensorflow.lite.support.** { *; }
+
+# Keep Room entities
+-keep class com.guardian.shield.data.local.db.**Entity { *; }
+
+# Keep Hilt generated code
+-keep class dagger.hilt.** { *; }
+-keep class javax.inject.** { *; }
+-keepclassmembers class * {
+    @javax.inject.Inject <init>(...);
+    @javax.inject.Inject <fields>;
 }
 
-# ─── Bulldog Blocker ─────────────────────────────────────────────────────────
--keep class com.ftt.bulldogblocker.** { *; }
+# Keep data classes (used with Room / Flow)
+-keep class com.guardian.shield.domain.model.** { *; }
 
-# ─── Android Accessibility / DeviceAdmin ─────────────────────────────────────
--keep class * extends android.accessibilityservice.AccessibilityService { *; }
--keep class * extends android.app.admin.DeviceAdminReceiver { *; }
--keep class * extends android.content.BroadcastReceiver { *; }
--keep class * extends android.app.Service { *; }
+# Timber
+-dontwarn org.jetbrains.annotations.**
 
-# ─── Kotlin Coroutines ──────────────────────────────────────────────────────
--keep class kotlinx.coroutines.** { *; }
--dontwarn kotlinx.coroutines.**
-# FIX: Coroutine debug info causes issues in release — suppress
--keepnames class kotlinx.coroutines.internal.MainDispatcherFactory {}
--keepnames class kotlinx.coroutines.CoroutineExceptionHandler {}
+# Kotlin coroutines
+-keepclassmembers class kotlinx.coroutines.** { *; }
 
-# ─── AndroidX / AppCompat ────────────────────────────────────────────────────
--keep class androidx.** { *; }
--dontwarn androidx.**
+# DataStore
+-keepclassmembers class androidx.datastore.** { *; }
+
+# EncryptedSharedPreferences / Security
+-keep class androidx.security.crypto.** { *; }
+
+# Keep enum names (used by BlockReason.valueOf())
+-keepclassmembers enum com.guardian.shield.** {
+    public static **[] values();
+    public static ** valueOf(java.lang.String);
+}

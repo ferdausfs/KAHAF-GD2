@@ -1,9 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.BulldogBlocker" parent="Theme.MaterialComponents.DayNight.DarkActionBar" />
 
-    <style name="Theme.BulldogBlocker.Fullscreen" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+    <style name="Theme.GuardianShield" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/primary</item>
+        <item name="colorPrimaryVariant">@color/primary_dark</item>
+        <item name="colorSecondary">@color/secondary</item>
+        <item name="colorError">@color/error</item>
+        <item name="android:windowBackground">?attr/colorSurface</item>
+    </style>
+
+    <style name="Theme.GuardianShield.Fullscreen" parent="Theme.GuardianShield">
         <item name="android:windowFullscreen">true</item>
         <item name="android:windowContentOverlay">@null</item>
-        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
     </style>
+
+    <!-- Section header label -->
+    <style name="SectionHeader">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:textSize">11sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:letterSpacing">0.1</item>
+        <item name="android:textColor">?attr/colorPrimary</item>
+        <item name="android:layout_marginTop">16dp</item>
+        <item name="android:layout_marginBottom">6dp</item>
+        <item name="android:layout_marginStart">4dp</item>
+    </style>
+
+    <!-- PIN dot (circle view) -->
+    <style name="PinDot">
+        <item name="android:layout_width">16dp</item>
+        <item name="android:layout_height">16dp</item>
+        <item name="android:layout_marginHorizontal">8dp</item>
+        <item name="android:background">@drawable/pin_dot_selector</item>
+    </style>
+
+    <!-- Numpad button -->
+    <style name="NumpadButton" parent="Widget.Material3.Button.OutlinedButton">
+        <item name="android:layout_width">72dp</item>
+        <item name="android:layout_height">72dp</item>
+        <item name="android:layout_margin">6dp</item>
+        <item name="android:textSize">22sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="cornerRadius">36dp</item>
+    </style>
+
 </resources>

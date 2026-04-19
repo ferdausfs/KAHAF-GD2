@@ -1,7 +1,13 @@
+# Built outputs
 *.iml
 .gradle
 /local.properties
-/.idea
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
 .DS_Store
 /build
 /captures
@@ -13,5 +19,10 @@ local.properties
 *.apk
 *.aab
 
-# DO commit the TFLite model (it's an asset)
-!app/src/main/assets/saved_model.tflite
+# Keystore (NEVER commit)
+*.jks
+*.keystore
+
+# Android Studio / IntelliJ
+*.iml
+.idea/
