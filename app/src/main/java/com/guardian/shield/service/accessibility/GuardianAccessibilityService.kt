@@ -312,6 +312,18 @@ class GuardianAccessibilityService : AccessibilityService() {
                 if (blockingEngine.isCoolingDown()) continue
                 if (aiBusy) continue
 
+                // BUG FIX — CRITICAL: Skip screenshot while blur overlay is visible.
+                // AccessibilityService.takeScreenshot() captures everything on screen,
+                // including our own blur overlay. The AI then sees a dark/pixelated frame
+                // and classifies it as "safe", immediately removing the blur — causing a
+                // rapid flicker loop where blur appears and vanishes every second.
+                // Fix: do not take a new screenshot while blur is already being shown.
+                // The overlay stays up until the user navigates away (onAppChanged hides it).
+                if (blurOverlayManager.isShowing || regionBlurManager.isShowing) {
+                    Timber.d("$TAG AI scan: blur already showing — skipping screenshot to prevent flicker loop")
+                    continue
+                }
+
                 Timber.d("$TAG AI scan: analyzing ${currentForegroundPkg}...")
                 captureAndAnalyze()
             }
@@ -470,12 +482,16 @@ class GuardianAccessibilityService : AccessibilityService() {
 
             } else {
                 // Safe content: hide ALL blur overlays
+                // BUG FIX: If blur was showing when screenshot was taken, the AI captured
+                // our own overlay (which looks dark/safe). Do NOT hide blur in that case.
+                // The scan loop guard (skip when isShowing) is the primary prevention,
+                // but this is a defensive second check for any race conditions.
                 val isAnyBlurShowing =
                     regionBlurManager.isShowing || blurOverlayManager.isShowing
-                if (isAnyBlurShowing && currentForegroundPkg == pkg) {
+                if (isAnyBlurShowing) {
+                    Timber.d("$TAG analyzeScreenshot: 'safe' result but blur is showing — screenshot captured overlay, ignoring")
+                } else if (currentForegroundPkg == pkg) {
                     val shouldBlock = blurTracker.onSafeDetected(pkg)
-                    regionBlurManager.hide()
-                    blurOverlayManager.hide()
                     Timber.d("$TAG blur hidden for $pkg — content cleared")
 
                     if (shouldBlock) {
