@@ -23,7 +23,6 @@ class BlurOverlayManager @Inject constructor(
 ) {
     companion object {
         private const val TAG = "Guardian_BlurOverlay"
-        // ✅ FIX: 100% opaque — no content visible through overlay
         private const val OVERLAY_ALPHA = 1.0f
         private const val BLUR_RADIUS = 30
     }
@@ -31,22 +30,25 @@ class BlurOverlayManager @Inject constructor(
     @Volatile var isShowing = false
         private set
 
-    private var overlayView: View? = null
+    @Volatile private var overlayView: View? = null
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val lock = Any()
 
     fun show() {
-        if (isShowing) return
         mainHandler.post {
-            if (isShowing) return@post
-            addOverlay()
+            synchronized(lock) {
+                if (isShowing) return@post
+                addOverlay()
+            }
         }
     }
 
     fun hide() {
-        if (!isShowing) return
         mainHandler.post {
-            if (!isShowing) return@post
-            removeOverlay()
+            synchronized(lock) {
+                if (!isShowing) return@post
+                removeOverlay()
+            }
         }
     }
 
@@ -71,7 +73,6 @@ class BlurOverlayManager @Inject constructor(
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                     val wm2 = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
                     if (wm2.isCrossWindowBlurEnabled) {
-                        @Suppress("DEPRECATION")
                         flags = flags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND
                         blurBehindRadius = BLUR_RADIUS
                         Timber.d("$TAG gaussian blur enabled")
@@ -85,8 +86,12 @@ class BlurOverlayManager @Inject constructor(
             Timber.d("$TAG overlay SHOWN")
         } catch (e: SecurityException) {
             Timber.e(e, "$TAG No SYSTEM_ALERT_WINDOW permission")
+            isShowing = false
+            overlayView = null
         } catch (e: Exception) {
             Timber.e(e, "$TAG addOverlay failed")
+            isShowing = false
+            overlayView = null
         }
     }
 
@@ -95,19 +100,17 @@ class BlurOverlayManager @Inject constructor(
             val view = overlayView ?: return
             val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
             wm.removeViewImmediate(view)
-            overlayView = null
-            isShowing = false
             Timber.d("$TAG overlay HIDDEN")
         } catch (e: Exception) {
+            Timber.w("$TAG removeOverlay: ${e.message}")
+        } finally {
             overlayView = null
             isShowing = false
-            Timber.w("$TAG removeOverlay: ${e.message}")
         }
     }
 
     private fun buildOverlayView(): View {
         return FrameLayout(context).apply {
-            // ✅ FIX: Fully opaque background — no content bleed
             setBackgroundColor(Color.argb((OVERLAY_ALPHA * 255).toInt(), 15, 15, 20))
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
             contentDescription = null

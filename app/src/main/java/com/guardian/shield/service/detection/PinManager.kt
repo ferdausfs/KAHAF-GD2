@@ -8,7 +8,8 @@ import javax.inject.Singleton
 
 @Singleton
 class PinManager @Inject constructor(
-    private val secureStorage: SecureStorage
+    private val secureStorage: SecureStorage,
+    private val pinRecovery: PinRecovery
 ) {
     companion object {
         const val MIN_PIN_LENGTH = 4
@@ -24,11 +25,29 @@ class PinManager @Inject constructor(
 
     fun isPinSet(): Boolean = secureStorage.isPinSet()
 
+    /**
+     * Saves PIN and generates a recovery code if none exists.
+     * Returns the recovery code if newly generated, null if already exists.
+     */
     fun savePin(pin: String): Boolean {
         if (pin.length < MIN_PIN_LENGTH || pin.length > MAX_PIN_LENGTH) return false
         if (!pin.all { it.isDigit() }) return false
         secureStorage.savePinHash(hash(pin))
+        // Auto-generate recovery code on first PIN setup
+        if (!pinRecovery.hasRecoveryCode()) {
+            pinRecovery.generateRecoveryCode()
+        }
         return true
+    }
+
+    /**
+     * Save PIN and return recovery code (for initial setup flow).
+     */
+    fun savePinWithRecoveryCode(pin: String): String? {
+        if (!savePin(pin)) return null
+        return if (!pinRecovery.hasRecoveryCode()) {
+            pinRecovery.generateRecoveryCode()
+        } else null
     }
 
     fun verifyPinWithLockout(input: String): VerifyResult {
@@ -56,9 +75,27 @@ class PinManager @Inject constructor(
         return verifyPinWithLockout(input) is VerifyResult.Success
     }
 
-    fun clearPin() = secureStorage.clearPin()
+    /**
+     * Reset PIN using recovery code. Clears old PIN so user can set a new one.
+     */
+    fun resetPinWithRecoveryCode(recoveryCode: String): Boolean {
+        if (!pinRecovery.verifyRecoveryCode(recoveryCode)) return false
+        secureStorage.clearPin()
+        return true
+    }
+
+    fun clearPin() {
+        secureStorage.clearPin()
+        pinRecovery.clearRecoveryCode()
+    }
 
     fun getFailCount(): Int = secureStorage.getFailCount()
+
+    fun getRecoveryCode(): String? = if (isPinSet()) {
+        secureStorage.getRecoveryCode()
+    } else null
+
+    fun regenerateRecoveryCode(): String = pinRecovery.generateRecoveryCode()
 
     private fun hash(value: String): String {
         val digest = MessageDigest.getInstance("SHA-256")

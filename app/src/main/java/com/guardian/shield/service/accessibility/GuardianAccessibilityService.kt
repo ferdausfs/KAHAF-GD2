@@ -9,6 +9,7 @@ import android.content.IntentFilter
 import android.graphics.Bitmap
 import android.graphics.Rect
 import android.os.Build
+import android.os.PowerManager
 import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -51,9 +52,8 @@ class GuardianAccessibilityService : AccessibilityService() {
         const val ACTION_UPDATE_SETTINGS = "com.guardian.shield.UPDATE_SETTINGS"
         private const val TEXT_DEBOUNCE_MS = 1200L
 
-        // ✅ FIX: Aggressive blur rechecking — no content flash
         private const val BLUR_RECHECK_MS = 600L
-        private const val SAFE_CONFIRM_COUNT = 2   // require 2 safe frames before unblur
+        private const val SAFE_CONFIRM_COUNT = 2
 
         private val BROWSER_PACKAGES = setOf(
             "com.android.chrome", "org.mozilla.firefox", "com.opera.browser",
@@ -73,6 +73,7 @@ class GuardianAccessibilityService : AccessibilityService() {
     private lateinit var blurOverlayManager: BlurOverlayManager
     private lateinit var regionBlurManager: RegionBlurOverlayManager
     private lateinit var tileAnalyzer: TileAnalyzer
+    private lateinit var powerManager: PowerManager
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
@@ -88,7 +89,6 @@ class GuardianAccessibilityService : AccessibilityService() {
     @Volatile private var blurShownAt = 0L
     @Volatile private var lastBlurRegions: List<Rect> = emptyList()
 
-    // ✅ FIX: Track consecutive safe frames to prevent content flash
     @Volatile private var consecutiveSafeFrames = 0
     @Volatile private var lastUnsafePkg = ""
 
@@ -137,6 +137,7 @@ class GuardianAccessibilityService : AccessibilityService() {
             blurOverlayManager = entryPoint.blurOverlayManager()
             regionBlurManager = entryPoint.regionBlurOverlayManager()
             tileAnalyzer = entryPoint.tileAnalyzer()
+            powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
             isInjected = true
             Timber.d("$TAG injection successful")
         } catch (e: Exception) {
@@ -172,7 +173,7 @@ class GuardianAccessibilityService : AccessibilityService() {
                 if (prev != pkg && prev.isNotBlank()) {
                     hideAllBlurImmediate()
                     blurTracker.onAppChanged(prev, pkg)
-                    consecutiveSafeFrames = 0  // ✅ reset on app switch
+                    consecutiveSafeFrames = 0
                     Timber.d("$TAG app changed: $prev → $pkg")
                 }
                 currentForegroundPkg = pkg
@@ -310,9 +311,13 @@ class GuardianAccessibilityService : AccessibilityService() {
                 delay(200)
             }
             while (isActive) {
-                val isBlurShowing = blurOverlayManager.isShowing || regionBlurManager.isShowing
+                // ✅ Skip scan if screen is off (battery save)
+                if (!powerManager.isInteractive) {
+                    delay(2000)
+                    continue
+                }
 
-                // ✅ FIX: Blur showing হলে দ্রুত recheck, নইলে normal interval
+                val isBlurShowing = blurOverlayManager.isShowing || regionBlurManager.isShowing
                 val currentInterval = if (isBlurShowing) BLUR_RECHECK_MS else aiIntervalMs
                 delay(currentInterval)
 
@@ -334,7 +339,6 @@ class GuardianAccessibilityService : AccessibilityService() {
                 if (blockingEngine.isCoolingDown()) continue
                 if (aiBusy) continue
 
-                // ✅ FIX: Blur visible অবস্থায় scan করো blur রেখেই — NO hide before scan
                 captureAndAnalyze()
             }
         }
@@ -424,7 +428,6 @@ class GuardianAccessibilityService : AccessibilityService() {
             Timber.d("$TAG AI[$pkg]: unsafe=${overallResult.unsafeScore}, label=${overallResult.label}")
 
             if (overallResult.isUnsafe) {
-                // ✅ FIX: Reset safe counter on unsafe detection
                 consecutiveSafeFrames = 0
                 lastUnsafePkg = pkg
 
@@ -470,8 +473,6 @@ class GuardianAccessibilityService : AccessibilityService() {
                     withContext(Dispatchers.Main) { hideAllBlurImmediate() }
                 }
             } else {
-                // ✅ FIX: Content safe — require N consecutive safe frames before removing blur
-                // এতে flash-of-content prevent হবে
                 consecutiveSafeFrames++
 
                 val isBlurShowing = blurOverlayManager.isShowing || regionBlurManager.isShowing

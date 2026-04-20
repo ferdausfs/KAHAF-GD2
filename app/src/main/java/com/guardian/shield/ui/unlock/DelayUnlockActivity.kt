@@ -1,6 +1,7 @@
 // app/src/main/java/com/guardian/shield/ui/unlock/DelayUnlockActivity.kt
 package com.guardian.shield.ui.unlock
 
+import android.content.Intent
 import android.os.Bundle
 import android.os.CountDownTimer
 import android.view.KeyEvent
@@ -24,14 +25,14 @@ class DelayUnlockActivity : AppCompatActivity() {
     private var countdownTimer: CountDownTimer? = null
     private var delaySecs = 30
 
-    // FIX #6: Proper back press callback
     private val backCallback = object : OnBackPressedCallback(true) {
         override fun handleOnBackPressed() {
             if (binding.groupCountdown.isVisible) {
-                // Block during countdown — do nothing
+                // Block during countdown
                 return
             }
-            // Allow after countdown (but user should use PIN)
+            // After countdown: go to home instead of allowing bypass
+            goToHome()
         }
     }
 
@@ -54,7 +55,14 @@ class DelayUnlockActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
-    // ── Phase 1: Countdown ─────────────────────────────────────────────
+    private fun goToHome() {
+        val homeIntent = Intent(Intent.ACTION_MAIN).apply {
+            addCategory(Intent.CATEGORY_HOME)
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        startActivity(homeIntent)
+        finish()
+    }
 
     private fun startCountdown() {
         binding.groupCountdown.isVisible = true
@@ -79,8 +87,6 @@ class DelayUnlockActivity : AppCompatActivity() {
         binding.groupCountdown.isVisible = false
         binding.groupPin.isVisible       = true
     }
-
-    // ── Phase 2: PIN numpad ────────────────────────────────────────────
 
     private fun setupNumpad() {
         val np = binding.numpad
@@ -130,8 +136,6 @@ class DelayUnlockActivity : AppCompatActivity() {
                     }.start()
             }.start()
     }
-
-    // ── Block hardware keys during countdown ──────────────────────────
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         if (keyCode == KeyEvent.KEYCODE_BACK && binding.groupCountdown.isVisible)

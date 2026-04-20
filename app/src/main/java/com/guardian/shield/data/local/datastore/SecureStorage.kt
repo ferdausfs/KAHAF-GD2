@@ -18,16 +18,15 @@ class SecureStorage @Inject constructor(
         private const val PREFS_NAME  = "guardian_secure"
         private const val KEY_PIN_HASH = "pin_hash"
         private const val KEY_PIN_SET  = "pin_set"
-        // FIX #6: PIN rate-limiting keys
         private const val KEY_FAIL_COUNT = "pin_fail_count"
         private const val KEY_LOCKOUT_UNTIL = "pin_lockout_until"
+        private const val KEY_RECOVERY_CODE = "recovery_code"
         private const val TAG = "SecureStorage"
 
-        // FIX #6: Rate limit thresholds
         const val MAX_FAILS_BEFORE_LOCKOUT = 5
-        const val LOCKOUT_DURATION_MS = 60_000L // 1 minute
-        const val EXTENDED_LOCKOUT_MS = 300_000L // 5 minutes after 10 fails
-        const val HARD_LOCKOUT_MS = 1_800_000L // 30 minutes after 15 fails
+        const val LOCKOUT_DURATION_MS = 60_000L
+        const val EXTENDED_LOCKOUT_MS = 300_000L
+        const val HARD_LOCKOUT_MS = 1_800_000L
     }
 
     private val prefs: SharedPreferences by lazy { buildPrefs() }
@@ -90,7 +89,7 @@ class SecureStorage @Inject constructor(
         }
     }
 
-    // FIX #6: Rate limiting methods
+    // ── Rate limiting ─────────────────────────────────────────────
 
     fun getFailCount(): Int = try {
         prefs.getInt(KEY_FAIL_COUNT, 0)
@@ -139,5 +138,30 @@ class SecureStorage @Inject constructor(
             val until = prefs.getLong(KEY_LOCKOUT_UNTIL, 0L)
             (until - System.currentTimeMillis()).coerceAtLeast(0L)
         } catch (e: Exception) { 0L }
+    }
+
+    // ── Recovery code ─────────────────────────────────────────────
+
+    fun saveRecoveryCode(code: String) {
+        try {
+            prefs.edit().putString(KEY_RECOVERY_CODE, code).apply()
+        } catch (e: Exception) {
+            Timber.e(e, "$TAG saveRecoveryCode failed")
+        }
+    }
+
+    fun getRecoveryCode(): String? = try {
+        prefs.getString(KEY_RECOVERY_CODE, null)
+    } catch (e: Exception) {
+        Timber.e(e, "$TAG getRecoveryCode failed")
+        null
+    }
+
+    fun clearRecoveryCode() {
+        try {
+            prefs.edit().remove(KEY_RECOVERY_CODE).apply()
+        } catch (e: Exception) {
+            Timber.e(e, "$TAG clearRecoveryCode failed")
+        }
     }
 }

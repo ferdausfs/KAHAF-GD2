@@ -31,6 +31,7 @@ class RegionBlurOverlayManager @Inject constructor(
 
     @Volatile private var blurView: RegionBlurView? = null
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val lock = Any()
 
     fun showRegions(tiles: List<Pair<Rect, Bitmap>>) {
         if (tiles.isEmpty()) {
@@ -38,52 +39,56 @@ class RegionBlurOverlayManager @Inject constructor(
             return
         }
         mainHandler.post {
-            val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            synchronized(lock) {
+                val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
 
-            if (blurView == null) {
-                val view = RegionBlurView(context)
-                try {
-                    wm.addView(view, buildLayoutParams())
-                    blurView = view
-                    isShowing = true
-                    Timber.d("$TAG overlay created")
-                } catch (e: SecurityException) {
-                    Timber.e("$TAG No SYSTEM_ALERT_WINDOW")
-                    tiles.forEach { runCatching { it.second.recycle() } }
-                    return@post
-                } catch (e: Exception) {
-                    Timber.e(e, "$TAG addView failed")
-                    tiles.forEach { runCatching { it.second.recycle() } }
-                    return@post
+                if (blurView == null) {
+                    val view = RegionBlurView(context)
+                    try {
+                        wm.addView(view, buildLayoutParams())
+                        blurView = view
+                        isShowing = true
+                        Timber.d("$TAG overlay created")
+                    } catch (e: SecurityException) {
+                        Timber.e("$TAG No SYSTEM_ALERT_WINDOW")
+                        tiles.forEach { runCatching { if (!it.second.isRecycled) it.second.recycle() } }
+                        return@synchronized
+                    } catch (e: Exception) {
+                        Timber.e(e, "$TAG addView failed")
+                        tiles.forEach { runCatching { if (!it.second.isRecycled) it.second.recycle() } }
+                        return@synchronized
+                    }
                 }
-            }
 
-            val view = blurView
-            if (view != null) {
-                view.updateTiles(tiles)
-            } else {
-                tiles.forEach { runCatching { it.second.recycle() } }
+                val view = blurView
+                if (view != null) {
+                    view.updateTiles(tiles)
+                } else {
+                    tiles.forEach { runCatching { if (!it.second.isRecycled) it.second.recycle() } }
+                }
             }
         }
     }
 
     fun hide() {
-        if (!isShowing && blurView == null) return
         mainHandler.post {
-            val view = blurView ?: run {
-                isShowing = false
-                return@post
-            }
-            try {
-                view.clearTiles()
-                val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-                wm.removeViewImmediate(view)
-                Timber.d("$TAG hidden")
-            } catch (e: Exception) {
-                Timber.w("$TAG hide: ${e.message}")
-            } finally {
-                blurView = null
-                isShowing = false
+            synchronized(lock) {
+                if (!isShowing && blurView == null) return@synchronized
+                val view = blurView ?: run {
+                    isShowing = false
+                    return@synchronized
+                }
+                try {
+                    view.clearTiles()
+                    val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+                    wm.removeViewImmediate(view)
+                    Timber.d("$TAG hidden")
+                } catch (e: Exception) {
+                    Timber.w("$TAG hide: ${e.message}")
+                } finally {
+                    blurView = null
+                    isShowing = false
+                }
             }
         }
     }
@@ -107,13 +112,13 @@ class RegionBlurOverlayManager @Inject constructor(
 internal class RegionBlurView(context: Context) : View(context) {
 
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
-    // FIX: Red border paint to indicate blocked regions visually
     private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeWidth = 4f
         color = Color.argb(180, 220, 40, 40)
     }
     private val tiles = mutableListOf<Pair<Rect, Bitmap>>()
+    private val tilesLock = Any()
 
     init {
         setBackgroundColor(Color.TRANSPARENT)
@@ -121,44 +126,50 @@ internal class RegionBlurView(context: Context) : View(context) {
     }
 
     fun updateTiles(newTiles: List<Pair<Rect, Bitmap>>) {
-        // Recycle old bitmaps first
-        tiles.forEach { 
-            runCatching { 
-                if (!it.second.isRecycled) it.second.recycle() 
-            } 
+        synchronized(tilesLock) {
+            tiles.forEach { 
+                runCatching { 
+                    if (!it.second.isRecycled) it.second.recycle() 
+                } 
+            }
+            tiles.clear()
+            tiles.addAll(newTiles)
         }
-        tiles.clear()
-        tiles.addAll(newTiles)
         invalidate()
     }
 
     fun clearTiles() {
-        tiles.forEach { 
-            runCatching { 
-                if (!it.second.isRecycled) it.second.recycle() 
-            } 
+        synchronized(tilesLock) {
+            tiles.forEach { 
+                runCatching { 
+                    if (!it.second.isRecycled) it.second.recycle() 
+                } 
+            }
+            tiles.clear()
         }
-        tiles.clear()
         invalidate()
     }
 
     override fun onDraw(canvas: Canvas) {
-        for ((rect, bmp) in tiles) {
-            if (!bmp.isRecycled) {
-                canvas.drawBitmap(bmp, null, rect, paint)
-                // Draw red border for visibility
-                canvas.drawRect(rect, borderPaint)
+        synchronized(tilesLock) {
+            for ((rect, bmp) in tiles) {
+                if (!bmp.isRecycled) {
+                    canvas.drawBitmap(bmp, null, rect, paint)
+                    canvas.drawRect(rect, borderPaint)
+                }
             }
         }
     }
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
-        tiles.forEach { 
-            runCatching { 
-                if (!it.second.isRecycled) it.second.recycle() 
-            } 
+        synchronized(tilesLock) {
+            tiles.forEach { 
+                runCatching { 
+                    if (!it.second.isRecycled) it.second.recycle() 
+                } 
+            }
+            tiles.clear()
         }
-        tiles.clear()
     }
 }
