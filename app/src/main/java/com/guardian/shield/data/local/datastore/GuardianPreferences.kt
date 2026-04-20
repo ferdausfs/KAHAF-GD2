@@ -34,8 +34,6 @@ class GuardianPreferences @Inject constructor(
         .catch { e -> Timber.e(e); emit(emptyPreferences()) }
         .map { it[KEY_PROTECTION_ENABLED] ?: true }
 
-    // FIX: Default AI = false. User should explicitly enable after uploading model.
-    // Previous default=true caused confusion when no model was present.
     val isAiDetectionEnabled: Flow<Boolean> = context.dataStore.data
         .catch { e -> Timber.e(e); emit(emptyPreferences()) }
         .map { it[KEY_AI_DETECTION_ON] ?: false }
@@ -56,15 +54,14 @@ class GuardianPreferences @Inject constructor(
         .catch { e -> Timber.e(e); emit(emptyPreferences()) }
         .map { it[KEY_FIRST_RUN] ?: true }
 
-    // FIX: Lower default threshold for better detection (0.35 instead of 0.40)
     val aiThreshold: Flow<Float> = context.dataStore.data
         .catch { e -> Timber.e(e); emit(emptyPreferences()) }
         .map { it[KEY_AI_THRESHOLD] ?: 0.35f }
 
-    // FIX: 1500ms interval - balance between responsiveness and battery
+    // ✅ FIX: Faster default — 800ms (was 1500ms) for snappier detection
     val aiIntervalMs: Flow<Long> = context.dataStore.data
         .catch { e -> Timber.e(e); emit(emptyPreferences()) }
-        .map { it[KEY_AI_INTERVAL_MS] ?: 1_500L }
+        .map { it[KEY_AI_INTERVAL_MS] ?: 800L }
 
     suspend fun setProtectionEnabled(enabled: Boolean) {
         context.dataStore.edit { it[KEY_PROTECTION_ENABLED] = enabled }
@@ -94,7 +91,8 @@ class GuardianPreferences @Inject constructor(
         context.dataStore.edit { it[KEY_AI_THRESHOLD] = v.coerceIn(0.10f, 0.90f) }
     }
 
+    // ✅ FIX: Allow faster interval down to 500ms
     suspend fun setAiIntervalMs(ms: Long) {
-        context.dataStore.edit { it[KEY_AI_INTERVAL_MS] = ms.coerceIn(1_000L, 10_000L) }
+        context.dataStore.edit { it[KEY_AI_INTERVAL_MS] = ms.coerceIn(500L, 10_000L) }
     }
 }

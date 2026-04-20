@@ -4,7 +4,6 @@ package com.guardian.shield.service.blur
 import android.content.Context
 import android.graphics.Color
 import android.graphics.PixelFormat
-import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -24,8 +23,8 @@ class BlurOverlayManager @Inject constructor(
 ) {
     companion object {
         private const val TAG = "Guardian_BlurOverlay"
-        // FIX: Stronger overlay - fully opaque to guarantee content hiding
-        private const val OVERLAY_ALPHA = 0.95f
+        // ✅ FIX: 100% opaque — no content visible through overlay
+        private const val OVERLAY_ALPHA = 1.0f
         private const val BLUR_RADIUS = 30
     }
 
@@ -106,14 +105,13 @@ class BlurOverlayManager @Inject constructor(
         }
     }
 
-    // FIX: Better visual with message and icon
     private fun buildOverlayView(): View {
         return FrameLayout(context).apply {
+            // ✅ FIX: Fully opaque background — no content bleed
             setBackgroundColor(Color.argb((OVERLAY_ALPHA * 255).toInt(), 15, 15, 20))
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
             contentDescription = null
 
-            // Add a visible message
             val messageView = TextView(context).apply {
                 text = "🛡️\n\nContent Blurred\nby Guardian Shield"
                 setTextColor(Color.WHITE)

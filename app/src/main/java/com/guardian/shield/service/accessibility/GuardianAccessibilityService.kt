@@ -51,8 +51,9 @@ class GuardianAccessibilityService : AccessibilityService() {
         const val ACTION_UPDATE_SETTINGS = "com.guardian.shield.UPDATE_SETTINGS"
         private const val TEXT_DEBOUNCE_MS = 1200L
 
-        private const val BLUR_RECHECK_MS = 2000L
-        private const val MAX_BLUR_HOLD_MS = 5000L
+        // ✅ FIX: Aggressive blur rechecking — no content flash
+        private const val BLUR_RECHECK_MS = 600L
+        private const val SAFE_CONFIRM_COUNT = 2   // require 2 safe frames before unblur
 
         private val BROWSER_PACKAGES = setOf(
             "com.android.chrome", "org.mozilla.firefox", "com.opera.browser",
@@ -78,14 +79,18 @@ class GuardianAccessibilityService : AccessibilityService() {
     @Volatile private var currentForegroundPkg = ""
     @Volatile private var aiEnabled = false
     @Volatile private var aiThreshold = 0.40f
-    @Volatile private var aiIntervalMs = 1_000L
+    @Volatile private var aiIntervalMs = 800L
     @Volatile private var aiScanJob: Job? = null
     @Volatile private var aiBusy = false
     @Volatile private var isInjected = false
-    @Volatile private var settingsLoaded = false  // FIX #4
+    @Volatile private var settingsLoaded = false
 
     @Volatile private var blurShownAt = 0L
     @Volatile private var lastBlurRegions: List<Rect> = emptyList()
+
+    // ✅ FIX: Track consecutive safe frames to prevent content flash
+    @Volatile private var consecutiveSafeFrames = 0
+    @Volatile private var lastUnsafePkg = ""
 
     private var textDebounceJob: Job? = null
     @Volatile private var watchdogJob: Job? = null
@@ -139,7 +144,6 @@ class GuardianAccessibilityService : AccessibilityService() {
             return
         }
 
-        // FIX #4: Sequential init - settings must be loaded BEFORE AI scan can start
         serviceScope.launch {
             loadRulesIntoEngine()
             loadSettings()
@@ -168,6 +172,7 @@ class GuardianAccessibilityService : AccessibilityService() {
                 if (prev != pkg && prev.isNotBlank()) {
                     hideAllBlurImmediate()
                     blurTracker.onAppChanged(prev, pkg)
+                    consecutiveSafeFrames = 0  // ✅ reset on app switch
                     Timber.d("$TAG app changed: $prev → $pkg")
                 }
                 currentForegroundPkg = pkg
@@ -301,12 +306,13 @@ class GuardianAccessibilityService : AccessibilityService() {
         stopAiScanLoop()
         aiScanJob = serviceScope.launch {
             Timber.d("$TAG AI scan loop STARTED")
-            // FIX #4: Wait for settings to be loaded
             while (!settingsLoaded && isActive) {
                 delay(200)
             }
             while (isActive) {
                 val isBlurShowing = blurOverlayManager.isShowing || regionBlurManager.isShowing
+
+                // ✅ FIX: Blur showing হলে দ্রুত recheck, নইলে normal interval
                 val currentInterval = if (isBlurShowing) BLUR_RECHECK_MS else aiIntervalMs
                 delay(currentInterval)
 
@@ -328,19 +334,7 @@ class GuardianAccessibilityService : AccessibilityService() {
                 if (blockingEngine.isCoolingDown()) continue
                 if (aiBusy) continue
 
-                if (isBlurShowing) {
-                    val blurAge = System.currentTimeMillis() - blurShownAt
-                    if (blurAge < BLUR_RECHECK_MS) continue
-
-                    Timber.d("$TAG Blur recheck after ${blurAge}ms")
-                    withContext(Dispatchers.Main) {
-                        regionBlurManager.hide()
-                        blurOverlayManager.hide()
-                    }
-                    // FIX #5: Increased delay for overlay removal
-                    delay(300)
-                }
-
+                // ✅ FIX: Blur visible অবস্থায় scan করো blur রেখেই — NO hide before scan
                 captureAndAnalyze()
             }
         }
@@ -349,6 +343,7 @@ class GuardianAccessibilityService : AccessibilityService() {
     private fun stopAiScanLoop() {
         aiScanJob?.cancel()
         aiScanJob = null
+        consecutiveSafeFrames = 0
         Timber.d("$TAG AI scan loop STOPPED")
     }
 
@@ -429,6 +424,10 @@ class GuardianAccessibilityService : AccessibilityService() {
             Timber.d("$TAG AI[$pkg]: unsafe=${overallResult.unsafeScore}, label=${overallResult.label}")
 
             if (overallResult.isUnsafe) {
+                // ✅ FIX: Reset safe counter on unsafe detection
+                consecutiveSafeFrames = 0
+                lastUnsafePkg = pkg
+
                 val evalResult = rulesEngine.evaluateAiResult(pkg, overallResult.unsafeScore, aiThreshold)
 
                 if (evalResult is DetectionResult.Blur) {
@@ -471,14 +470,24 @@ class GuardianAccessibilityService : AccessibilityService() {
                     withContext(Dispatchers.Main) { hideAllBlurImmediate() }
                 }
             } else {
-                withContext(Dispatchers.Main) {
-                    if (blurOverlayManager.isShowing || regionBlurManager.isShowing) {
-                        hideAllBlurImmediate()
-                        Timber.d("$TAG content SAFE — blur removed")
+                // ✅ FIX: Content safe — require N consecutive safe frames before removing blur
+                // এতে flash-of-content prevent হবে
+                consecutiveSafeFrames++
+
+                val isBlurShowing = blurOverlayManager.isShowing || regionBlurManager.isShowing
+
+                if (isBlurShowing) {
+                    if (consecutiveSafeFrames >= SAFE_CONFIRM_COUNT) {
+                        withContext(Dispatchers.Main) {
+                            hideAllBlurImmediate()
+                            Timber.d("$TAG content SAFE ($consecutiveSafeFrames frames) — blur removed")
+                        }
+                    } else {
+                        Timber.d("$TAG safe frame $consecutiveSafeFrames/$SAFE_CONFIRM_COUNT — keeping blur")
                     }
                 }
 
-                if (currentForegroundPkg == pkg) {
+                if (currentForegroundPkg == pkg && consecutiveSafeFrames >= SAFE_CONFIRM_COUNT) {
                     val shouldBlock = blurTracker.onSafeDetected(pkg)
                     if (shouldBlock) {
                         Timber.w("$TAG CUMULATIVE BLOCK on safe-clear: $pkg")
@@ -550,7 +559,7 @@ class GuardianAccessibilityService : AccessibilityService() {
             rulesEngine.setProtectionEnabled(protectionOn)
             rulesEngine.setKeywordDetectionEnabled(keywordOn)
             rulesEngine.setStrictMode(strictMode)
-            Timber.d("$TAG settings: ai=$aiEnabled, keyword=$keywordOn, protection=$protectionOn, strict=$strictMode, threshold=$aiThreshold")
+            Timber.d("$TAG settings: ai=$aiEnabled, keyword=$keywordOn, protection=$protectionOn, strict=$strictMode, threshold=$aiThreshold, interval=${aiIntervalMs}ms")
         } catch (e: Exception) {
             Timber.e(e, "$TAG loadSettings failed")
         }

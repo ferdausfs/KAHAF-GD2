@@ -14,15 +14,12 @@ class TileAnalyzer @Inject constructor(
 ) {
     companion object {
         private const val TAG = "Guardian_Tiles"
-        // FIX: Reduced tile count for faster analysis (6 tiles instead of 12)
         const val COLS = 2
         const val ROWS = 3
-        private const val PIXELATE_FACTOR = 20  // Stronger pixelation
-        
-        // FIX: More aggressive tile threshold (45% of main)
+        // ✅ FIX: Stronger pixelation (40x) — content unrecognizable
+        private const val PIXELATE_FACTOR = 40
+
         const val TILE_THRESHOLD_FACTOR = 0.45f
-        
-        // FIX: Minimum tile size to avoid tiny useless tiles
         private const val MIN_TILE_SIZE_PX = 100
     }
 
@@ -32,12 +29,12 @@ class TileAnalyzer @Inject constructor(
     ) {
         val isAnyUnsafe: Boolean get() = unsafeTiles.isNotEmpty()
 
-        fun recycle() { 
-            unsafeTiles.forEach { 
-                runCatching { 
-                    if (!it.second.isRecycled) it.second.recycle() 
-                } 
-            } 
+        fun recycle() {
+            unsafeTiles.forEach {
+                runCatching {
+                    if (!it.second.isRecycled) it.second.recycle()
+                }
+            }
         }
     }
 
@@ -49,7 +46,7 @@ class TileAnalyzer @Inject constructor(
     ): TileAnalysisResult {
         val tileW = croppedBitmap.width / COLS
         val tileH = croppedBitmap.height / ROWS
-        
+
         if (tileW < MIN_TILE_SIZE_PX || tileH < MIN_TILE_SIZE_PX) {
             Timber.w("$TAG bitmap too small for tile analysis")
             return TileAnalysisResult(emptyList(), 0f)
@@ -70,7 +67,7 @@ class TileAnalyzer @Inject constructor(
                 var tile: Bitmap? = null
                 try {
                     tile = Bitmap.createBitmap(croppedBitmap, x, y, w, h)
-                    
+
                     if (aiDetector.shouldSkipFrame(tile)) continue
 
                     val result = aiDetector.classify(tile, tileThreshold)
