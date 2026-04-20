@@ -14,12 +14,12 @@ class TileAnalyzer @Inject constructor(
 ) {
     companion object {
         private const val TAG = "Guardian_Tiles"
-        const val COLS = 5
-        const val ROWS = 9
+        const val COLS = 10
+        const val ROWS = 30
         // ✅ FIX: Stronger pixelation (40x) — content unrecognizable
-        private const val PIXELATE_FACTOR = 20
+        private const val PIXELATE_FACTOR = 60
 
-        const val TILE_THRESHOLD_FACTOR = 0.40f
+        const val TILE_THRESHOLD_FACTOR = 0.38f
         private const val MIN_TILE_SIZE_PX = 100
     }
 
