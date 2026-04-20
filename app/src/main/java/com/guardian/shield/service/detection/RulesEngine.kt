@@ -1,14 +1,19 @@
 // app/src/main/java/com/guardian/shield/service/detection/RulesEngine.kt
 package com.guardian.shield.service.detection
 
+import android.content.Context
+import android.content.Intent
 import com.guardian.shield.domain.model.BlockReason
 import com.guardian.shield.domain.model.DetectionResult
+import dagger.hilt.android.qualifiers.ApplicationContext
 import timber.log.Timber
 import javax.inject.Inject
 import javax.inject.Singleton
 
 @Singleton
-class RulesEngine @Inject constructor() {
+class RulesEngine @Inject constructor(
+    @ApplicationContext private val context: Context
+) {
 
     companion object {
         const val OUR_PACKAGE = "com.guardian.shield"
@@ -31,16 +36,6 @@ class RulesEngine @Inject constructor() {
             "com.nothing.launcher",
             "com.samsung.android.app.taskbar"
         )
-        
-        // FIX: Common launcher packages that should NEVER be blocked even in strict mode
-        private val LAUNCHER_PACKAGES = setOf(
-            "com.android.launcher", "com.android.launcher3",
-            "com.google.android.apps.nexuslauncher",
-            "com.sec.android.app.launcher",
-            "com.miui.home", "com.oneplus.launcher",
-            "com.nothing.launcher", "com.oppo.launcher",
-            "com.vivo.launcher", "com.huawei.android.launcher"
-        )
     }
 
     @Volatile private var blockedPackages: Set<String> = emptySet()
@@ -49,10 +44,15 @@ class RulesEngine @Inject constructor() {
     @Volatile private var isProtectionEnabled: Boolean = true
     @Volatile private var isStrictMode: Boolean = false
 
+    // FIX #7: Cache real launcher packages queried from PackageManager
+    @Volatile private var realLauncherPackages: Set<String> = emptySet()
+    @Volatile private var launcherCacheTime: Long = 0L
+    private val launcherCacheMs = 60_000L
+
     private data class KeywordPattern(
         val keyword: String,
         val pattern: Regex,
-        val isUnicode: Boolean  // FIX: Track unicode keywords for different matching
+        val isUnicode: Boolean
     )
 
     @Volatile private var keywordPatterns: List<KeywordPattern> = emptyList()
@@ -67,24 +67,21 @@ class RulesEngine @Inject constructor() {
         Timber.d("$TAG whitelist: ${packages.size} apps")
     }
 
-    // FIX: Better keyword matching - handles unicode (Bangla/Hindi/Arabic)
     fun refreshKeywords(keywords: List<String>) {
         keywordPatterns = keywords.mapNotNull { kw ->
             val normalized = kw.lowercase().trim()
             if (normalized.isEmpty()) return@mapNotNull null
-            
-            // Check if keyword contains non-ASCII (unicode)
+
             val isUnicode = normalized.any { it.code > 127 }
-            
+
             try {
                 val pattern = if (isUnicode) {
-                    // For unicode: use lookaround instead of \b (which doesn't work for Bangla/Hindi)
-                    // Match if surrounded by non-letter chars or start/end
                     Regex("(?<![\\p{L}\\p{N}])${Regex.escape(normalized)}(?![\\p{L}\\p{N}])")
                 } else {
-                    // ASCII: word boundary works fine
                     Regex("\\b${Regex.escape(normalized)}\\b")
                 }
+                // FIX #10: Warm up regex
+                pattern.containsMatchIn("warmup")
                 KeywordPattern(normalized, pattern, isUnicode)
             } catch (e: Exception) {
                 Timber.e(e, "$TAG invalid keyword regex: $normalized")
@@ -106,20 +103,18 @@ class RulesEngine @Inject constructor() {
         if (packageName == OUR_PACKAGE) return DetectionResult.Allow
         if (isSystemPackage(packageName)) return DetectionResult.Allow
 
-        // Whitelist always wins
         if (packageName in whitelistedPackages) {
             Timber.d("$TAG ALLOW (whitelist): $packageName")
             return DetectionResult.Whitelist
         }
 
-        // Blocked list
         if (packageName in blockedPackages) {
             Timber.d("$TAG BLOCK (app list): $packageName")
             return DetectionResult.Block(BlockReason.APP_BLOCKED, packageName)
         }
 
-        // FIX: STRICT MODE - block anything not whitelisted (except launchers/system)
-        if (isStrictMode && !isLauncherPackage(packageName)) {
+        // FIX #7: Real launcher check instead of string matching
+        if (isStrictMode && !isRealLauncher(packageName)) {
             Timber.d("$TAG BLOCK (strict mode): $packageName")
             return DetectionResult.Block(
                 BlockReason.APP_BLOCKED,
@@ -175,11 +170,26 @@ class RulesEngine @Inject constructor() {
         return false
     }
 
-    private fun isLauncherPackage(pkg: String): Boolean {
-        if (pkg in LAUNCHER_PACKAGES) return true
-        // Common launcher patterns
-        return pkg.contains("launcher", ignoreCase = true) ||
-               pkg.endsWith(".home") ||
-               pkg.contains("homescreen", ignoreCase = true)
+    /**
+     * FIX #7: Query PackageManager for actual HOME intent handlers.
+     * Cached for 60 seconds to avoid repeated IPC calls.
+     */
+    private fun isRealLauncher(pkg: String): Boolean {
+        val now = System.currentTimeMillis()
+        if (now - launcherCacheTime > launcherCacheMs || realLauncherPackages.isEmpty()) {
+            try {
+                val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+                val launchers = context.packageManager
+                    .queryIntentActivities(intent, 0)
+                    .map { it.activityInfo.packageName }
+                    .toSet()
+                realLauncherPackages = launchers
+                launcherCacheTime = now
+                Timber.d("$TAG launcher cache refreshed: ${launchers.size} launchers")
+            } catch (e: Exception) {
+                Timber.e(e, "$TAG queryIntentActivities failed")
+            }
+        }
+        return pkg in realLauncherPackages
     }
 }

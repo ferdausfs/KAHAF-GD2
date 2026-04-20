@@ -49,11 +49,10 @@ class GuardianAccessibilityService : AccessibilityService() {
         const val ACTION_REFRESH_RULES = "com.guardian.shield.REFRESH_RULES"
         const val ACTION_RELOAD_MODEL  = "com.guardian.shield.RELOAD_MODEL"
         const val ACTION_UPDATE_SETTINGS = "com.guardian.shield.UPDATE_SETTINGS"
-        private const val TEXT_DEBOUNCE_MS = 1200L  // Increased from 700ms (battery)
-        
-        // FIX: Blur verification interval - check if content is still unsafe WHILE blur is shown
-        private const val BLUR_RECHECK_MS = 2000L   // Recheck every 2s while blur is visible
-        private const val MAX_BLUR_HOLD_MS = 5000L  // Force recheck after 5s
+        private const val TEXT_DEBOUNCE_MS = 1200L
+
+        private const val BLUR_RECHECK_MS = 2000L
+        private const val MAX_BLUR_HOLD_MS = 5000L
 
         private val BROWSER_PACKAGES = setOf(
             "com.android.chrome", "org.mozilla.firefox", "com.opera.browser",
@@ -83,8 +82,8 @@ class GuardianAccessibilityService : AccessibilityService() {
     @Volatile private var aiScanJob: Job? = null
     @Volatile private var aiBusy = false
     @Volatile private var isInjected = false
-    
-    // FIX: Track blur state timing for smart recheck
+    @Volatile private var settingsLoaded = false  // FIX #4
+
     @Volatile private var blurShownAt = 0L
     @Volatile private var lastBlurRegions: List<Rect> = emptyList()
 
@@ -140,13 +139,13 @@ class GuardianAccessibilityService : AccessibilityService() {
             return
         }
 
-        // FIX: Load everything BEFORE starting scan loop
+        // FIX #4: Sequential init - settings must be loaded BEFORE AI scan can start
         serviceScope.launch {
             loadRulesIntoEngine()
             loadSettings()
             blockingEngine.loadSettings()
+            settingsLoaded = true
 
-            // FIX: Always try to load AI model if file exists, regardless of toggle
             if (AiDetector.isModelAvailable(applicationContext)) {
                 Timber.d("$TAG Model file found — loading")
                 reloadAiModel()
@@ -167,7 +166,6 @@ class GuardianAccessibilityService : AccessibilityService() {
             if (!SYSTEM_UI_SKIP.contains(pkg) && !rulesEngine.isSystemUi(pkg)) {
                 val prev = currentForegroundPkg
                 if (prev != pkg && prev.isNotBlank()) {
-                    // FIX: Hide all blur immediately on app change
                     hideAllBlurImmediate()
                     blurTracker.onAppChanged(prev, pkg)
                     Timber.d("$TAG app changed: $prev → $pkg")
@@ -200,7 +198,6 @@ class GuardianAccessibilityService : AccessibilityService() {
         super.onDestroy()
     }
 
-    // FIX: Centralized blur hide with state cleanup
     private fun hideAllBlurImmediate() {
         try {
             regionBlurManager.hide()
@@ -304,15 +301,17 @@ class GuardianAccessibilityService : AccessibilityService() {
         stopAiScanLoop()
         aiScanJob = serviceScope.launch {
             Timber.d("$TAG AI scan loop STARTED")
+            // FIX #4: Wait for settings to be loaded
+            while (!settingsLoaded && isActive) {
+                delay(200)
+            }
             while (isActive) {
-                // FIX: Use dynamic interval - shorter when blur is showing to recheck faster
                 val isBlurShowing = blurOverlayManager.isShowing || regionBlurManager.isShowing
                 val currentInterval = if (isBlurShowing) BLUR_RECHECK_MS else aiIntervalMs
                 delay(currentInterval)
 
                 if (currentForegroundPkg.isBlank()) continue
                 if (!rulesEngine.isProtectionActive()) {
-                    // Protection turned off - hide any blur
                     if (isBlurShowing) {
                         withContext(Dispatchers.Main) { hideAllBlurImmediate() }
                     }
@@ -329,19 +328,17 @@ class GuardianAccessibilityService : AccessibilityService() {
                 if (blockingEngine.isCoolingDown()) continue
                 if (aiBusy) continue
 
-                // FIX: Smart blur recheck logic
                 if (isBlurShowing) {
                     val blurAge = System.currentTimeMillis() - blurShownAt
-                    // Force recheck after MAX_BLUR_HOLD_MS to prevent stuck blur
                     if (blurAge < BLUR_RECHECK_MS) continue
-                    
+
                     Timber.d("$TAG Blur recheck after ${blurAge}ms")
-                    // Hide blur temporarily to take clean screenshot
                     withContext(Dispatchers.Main) {
                         regionBlurManager.hide()
                         blurOverlayManager.hide()
                     }
-                    delay(150)  // Wait for overlay to actually disappear
+                    // FIX #5: Increased delay for overlay removal
+                    delay(300)
                 }
 
                 captureAndAnalyze()
@@ -454,7 +451,7 @@ class GuardianAccessibilityService : AccessibilityService() {
                         }
                         blurShownAt = System.currentTimeMillis()
                     }
-                    tileResult = null  // ownership transferred
+                    tileResult = null
 
                     val shouldBlock = blurTracker.onUnsafeDetected(pkg)
                     val totalMs = blurTracker.getTotalBlurMs(pkg)
@@ -474,7 +471,6 @@ class GuardianAccessibilityService : AccessibilityService() {
                     withContext(Dispatchers.Main) { hideAllBlurImmediate() }
                 }
             } else {
-                // SAFE content detected
                 withContext(Dispatchers.Main) {
                     if (blurOverlayManager.isShowing || regionBlurManager.isShowing) {
                         hideAllBlurImmediate()

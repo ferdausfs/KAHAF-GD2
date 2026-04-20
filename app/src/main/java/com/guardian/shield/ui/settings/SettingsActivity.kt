@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import timber.log.Timber
+import java.io.File
 
 @AndroidEntryPoint
 class SettingsActivity : AppCompatActivity() {
@@ -36,8 +37,10 @@ class SettingsActivity : AppCompatActivity() {
 
     private var isUpdatingFromState = false
 
+    // FIX #1: OpenDocument is more reliable for .tflite files than GetContent
+    // GetContent uses MIME filtering which greys out .tflite in many file managers
     private val modelPickLauncher = registerForActivityResult(
-        ActivityResultContracts.GetContent()
+        ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         uri?.let { importModel(it) }
     }
@@ -82,12 +85,11 @@ class SettingsActivity : AppCompatActivity() {
         binding.switchKeyword.setOnCheckedChangeListener { _, checked ->
             if (!isUpdatingFromState) settingsVm.toggleKeyword(checked)
         }
-        
+
         binding.switchAi.setOnCheckedChangeListener { _, checked ->
             if (!isUpdatingFromState) {
                 val modelAvail = AiDetector.isModelAvailable(this)
                 if (checked && !modelAvail) {
-                    // Don't enable if no model
                     isUpdatingFromState = true
                     binding.switchAi.isChecked = false
                     isUpdatingFromState = false
@@ -97,11 +99,10 @@ class SettingsActivity : AppCompatActivity() {
                 settingsVm.toggleAi(checked, modelAvailable = modelAvail)
             }
         }
-        
+
         binding.switchStrictMode.setOnCheckedChangeListener { _, checked ->
             if (!isUpdatingFromState) {
                 if (checked) {
-                    // Confirm strict mode
                     MaterialAlertDialogBuilder(this)
                         .setTitle("Enable Strict Mode?")
                         .setMessage("Only apps in your Trusted Apps list will work. All other apps (except launcher) will be blocked. Make sure your essential apps are in the Trusted list first.")
@@ -136,8 +137,19 @@ class SettingsActivity : AppCompatActivity() {
             }
         }
 
+        // FIX #1: Use multiple MIME types for better file picker compatibility
         binding.btnUploadModel.setOnClickListener {
-            modelPickLauncher.launch("*/*")
+            try {
+                modelPickLauncher.launch(arrayOf(
+                    "application/octet-stream",
+                    "application/x-tflite",
+                    "application/tflite",
+                    "*/*"
+                ))
+            } catch (e: Exception) {
+                Timber.e(e, "Failed to launch file picker")
+                settingsVm.showMessage("❌ Cannot open file picker")
+            }
         }
 
         binding.btnAddKeyword.setOnClickListener {
@@ -204,7 +216,7 @@ class SettingsActivity : AppCompatActivity() {
                 updateModelStatus()
 
                 state.snackMessage?.let { msg ->
-                    Snackbar.make(binding.root, msg, Snackbar.LENGTH_SHORT).show()
+                    Snackbar.make(binding.root, msg, Snackbar.LENGTH_LONG).show()
                     settingsVm.clearMessage()
                 }
             }
@@ -244,24 +256,77 @@ class SettingsActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * FIX #3: Proper TFLite file validation using magic bytes.
+     * TFLite files have "TFL3" signature at offset 4.
+     */
+    private suspend fun isValidTfliteFile(file: File): Boolean = withContext(Dispatchers.IO) {
+        try {
+            if (!file.exists() || file.length() < 8) return@withContext false
+            file.inputStream().use { input ->
+                val magic = ByteArray(8)
+                val read = input.read(magic)
+                if (read < 8) return@withContext false
+                // TFLite magic: bytes 4-7 should be "TFL3"
+                magic[4] == 'T'.code.toByte() &&
+                magic[5] == 'F'.code.toByte() &&
+                magic[6] == 'L'.code.toByte() &&
+                magic[7] == '3'.code.toByte()
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "Validation error")
+            false
+        }
+    }
+
     private fun importModel(uri: Uri) {
-        Timber.d("Importing model: $uri")
+        Timber.d("Importing model from: $uri")
         lifecycleScope.launch {
             try {
                 val dest = AiDetector.modelFile(this@SettingsActivity)
+                val tempFile = File(this@SettingsActivity.filesDir, "temp_model.tflite")
 
-                withContext(Dispatchers.IO) {
+                // Copy to temp file first for validation
+                val bytesCopied = withContext(Dispatchers.IO) {
                     contentResolver.openInputStream(uri)?.use { input ->
-                        dest.outputStream().use { output ->
-                            val bytes = input.copyTo(output)
-                            Timber.d("Model copied: $bytes bytes")
+                        tempFile.outputStream().use { output ->
+                            input.copyTo(output)
                         }
-                    } ?: throw Exception("Could not open file")
+                    } ?: throw Exception("Could not open selected file")
+                }
+
+                Timber.d("Temp copy done: $bytesCopied bytes")
+
+                // Validate size
+                if (bytesCopied < 1024) {
+                    tempFile.delete()
+                    settingsVm.showMessage("❌ File too small — not a valid model")
+                    return@launch
+                }
+
+                // FIX #3: Validate TFLite magic bytes
+                if (!isValidTfliteFile(tempFile)) {
+                    tempFile.delete()
+                    settingsVm.showMessage("❌ Not a valid .tflite file (wrong format)")
+                    return@launch
+                }
+
+                // Move temp → final
+                withContext(Dispatchers.IO) {
+                    if (dest.exists()) dest.delete()
+                    if (!tempFile.renameTo(dest)) {
+                        // Fallback: copy + delete
+                        tempFile.inputStream().use { input ->
+                            dest.outputStream().use { output ->
+                                input.copyTo(output)
+                            }
+                        }
+                        tempFile.delete()
+                    }
                 }
 
                 if (!dest.exists() || dest.length() < 1024) {
-                    dest.delete()
-                    settingsVm.showMessage("❌ Invalid model file")
+                    settingsVm.showMessage("❌ Failed to save model")
                     return@launch
                 }
 
@@ -277,14 +342,16 @@ class SettingsActivity : AppCompatActivity() {
                     )
                     settingsVm.showMessage("✓ Model imported (${sizeKB}KB) — reloading...")
                 } else {
-                    // Auto-enable AI when model is uploaded
                     settingsVm.toggleAi(true, modelAvailable = true)
                     settingsVm.showMessage("✓ Model imported & AI enabled (${sizeKB}KB)")
                 }
 
+            } catch (e: SecurityException) {
+                Timber.e(e, "Permission denied")
+                settingsVm.showMessage("❌ Permission denied — try again")
             } catch (e: Exception) {
                 Timber.e(e, "Model import failed")
-                settingsVm.showMessage("❌ Import failed: ${e.message}")
+                settingsVm.showMessage("❌ Import failed: ${e.message ?: "Unknown error"}")
             }
         }
     }

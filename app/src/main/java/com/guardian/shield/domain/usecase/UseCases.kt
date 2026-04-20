@@ -1,3 +1,4 @@
+// app/src/main/java/com/guardian/shield/domain/usecase/UseCases.kt
 package com.guardian.shield.domain.usecase
 
 import com.guardian.shield.data.local.datastore.GuardianPreferences
@@ -94,10 +95,12 @@ class SetupPinUseCase @Inject constructor(
     }
 }
 
+// FIX #6: Now returns VerifyResult instead of Boolean
 class VerifyPinUseCase @Inject constructor(
     private val pinManager: PinManager
 ) {
-    operator fun invoke(input: String): Boolean = pinManager.verifyPin(input)
+    operator fun invoke(input: String): PinManager.VerifyResult =
+        pinManager.verifyPinWithLockout(input)
 }
 
 class IsPinSetUseCase @Inject constructor(
@@ -130,10 +133,6 @@ class ToggleKeywordDetectionUseCase @Inject constructor(
     suspend operator fun invoke(enabled: Boolean) = prefs.setKeywordDetection(enabled)
 }
 
-// BUG FIX: ToggleStrictModeUseCase was missing entirely.
-// GuardianPreferences.setStrictMode() existed, RulesEngine.setStrictMode() existed,
-// but there was no use case bridging them — strict mode toggle in SettingsActivity
-// was silently doing nothing (no-op). Added here to complete the feature.
 class ToggleStrictModeUseCase @Inject constructor(
     private val prefs: GuardianPreferences
 ) {

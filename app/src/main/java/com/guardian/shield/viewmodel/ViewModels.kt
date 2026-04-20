@@ -112,11 +112,11 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch {
             toggleStrictModeUseCase(enabled)
             notifyService(GuardianAccessibilityService.ACTION_REFRESH_RULES)
-            _uiState.update { 
-                it.copy(snackMessage = if (enabled) 
-                    "Strict mode ON — only trusted apps allowed" 
-                else 
-                    "Strict mode OFF") 
+            _uiState.update {
+                it.copy(snackMessage = if (enabled)
+                    "Strict mode ON — only trusted apps allowed"
+                else
+                    "Strict mode OFF")
             }
         }
     }
@@ -128,7 +128,6 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
-    // FIX: Live threshold update - notifies service to reload value
     fun setAiThreshold(v: Float) {
         viewModelScope.launch {
             prefs.setAiThreshold(v)
@@ -258,12 +257,24 @@ class PinViewModel @Inject constructor(
         }
     }
 
+    // FIX #6: Handle lockout result
     fun verifyPin() {
         val pin = _uiState.value.input
-        if (verifyPinUseCase(pin)) {
-            _uiState.update { it.copy(isVerified = true, error = null) }
-        } else {
-            _uiState.update { it.copy(input = "", error = "Incorrect PIN") }
+        when (val result = verifyPinUseCase(pin)) {
+            is PinManager.VerifyResult.Success ->
+                _uiState.update { it.copy(isVerified = true, error = null) }
+            is PinManager.VerifyResult.WrongPin ->
+                _uiState.update { it.copy(input = "", error = "Incorrect PIN") }
+            is PinManager.VerifyResult.LockedOut -> {
+                val seconds = (result.remainingMs / 1000).toInt()
+                val mins = seconds / 60
+                val secs = seconds % 60
+                val msg = if (mins > 0) "Locked. Try in ${mins}m ${secs}s"
+                          else "Locked. Try in ${secs}s"
+                _uiState.update { it.copy(input = "", error = msg) }
+            }
+            is PinManager.VerifyResult.NotSet ->
+                _uiState.update { it.copy(error = "PIN not set") }
         }
     }
 
