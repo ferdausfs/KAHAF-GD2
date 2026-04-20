@@ -37,8 +37,7 @@ class SettingsActivity : AppCompatActivity() {
 
     private var isUpdatingFromState = false
 
-    // FIX #1: OpenDocument is more reliable for .tflite files than GetContent
-    // GetContent uses MIME filtering which greys out .tflite in many file managers
+    // OpenDocument is more reliable for .tflite files than GetContent
     private val modelPickLauncher = registerForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
@@ -93,7 +92,7 @@ class SettingsActivity : AppCompatActivity() {
                     isUpdatingFromState = true
                     binding.switchAi.isChecked = false
                     isUpdatingFromState = false
-                    settingsVm.showMessage("⚠️ Upload a .tflite model first!")
+                    settingsVm.showMessage("⚠️ Tap 'Upload .tflite Model' button below first!")
                     return@setOnCheckedChangeListener
                 }
                 settingsVm.toggleAi(checked, modelAvailable = modelAvail)
@@ -137,7 +136,7 @@ class SettingsActivity : AppCompatActivity() {
             }
         }
 
-        // FIX #1: Use multiple MIME types for better file picker compatibility
+        // File picker with multiple MIME types for better compatibility
         binding.btnUploadModel.setOnClickListener {
             try {
                 modelPickLauncher.launch(arrayOf(
@@ -209,7 +208,13 @@ class SettingsActivity : AppCompatActivity() {
                 binding.tvDelayValue.text = "${state.delayUnlockSeconds}s"
                 binding.sliderAiThreshold.value = state.aiThreshold
                 binding.tvAiThresholdValue.text = "${(state.aiThreshold * 100).toInt()}%"
-                binding.layoutAiOptions.isVisible = state.isAiEnabled
+
+                // ✅ FIX: Upload section সবসময় visible রাখি যাতে user আগে
+                // model upload করে, তারপর AI toggle ON করতে পারে।
+                // আগে এটা state.isAiEnabled এর উপর নির্ভর করত — ফলে
+                // chicken-and-egg deadlock হত (AI ON করতে model লাগে,
+                // model upload button দেখতে AI ON লাগে)।
+                binding.layoutAiOptions.isVisible = true
 
                 isUpdatingFromState = false
 
@@ -232,7 +237,7 @@ class SettingsActivity : AppCompatActivity() {
             binding.tvModelStatus.text = "✓ Model loaded (${sizeKB}KB)"
             binding.tvModelStatus.setTextColor(getColor(android.R.color.holo_green_dark))
         } else {
-            binding.tvModelStatus.text = "⚠️ No model — upload .tflite"
+            binding.tvModelStatus.text = "⚠️ No model — tap button below to upload .tflite"
             binding.tvModelStatus.setTextColor(getColor(android.R.color.holo_orange_dark))
         }
     }
@@ -257,7 +262,7 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     /**
-     * FIX #3: Proper TFLite file validation using magic bytes.
+     * Proper TFLite file validation using magic bytes.
      * TFLite files have "TFL3" signature at offset 4.
      */
     private suspend fun isValidTfliteFile(file: File): Boolean = withContext(Dispatchers.IO) {
@@ -304,7 +309,7 @@ class SettingsActivity : AppCompatActivity() {
                     return@launch
                 }
 
-                // FIX #3: Validate TFLite magic bytes
+                // Validate TFLite magic bytes
                 if (!isValidTfliteFile(tempFile)) {
                     tempFile.delete()
                     settingsVm.showMessage("❌ Not a valid .tflite file (wrong format)")
@@ -342,6 +347,7 @@ class SettingsActivity : AppCompatActivity() {
                     )
                     settingsVm.showMessage("✓ Model imported (${sizeKB}KB) — reloading...")
                 } else {
+                    // Auto-enable AI after successful model import
                     settingsVm.toggleAi(true, modelAvailable = true)
                     settingsVm.showMessage("✓ Model imported & AI enabled (${sizeKB}KB)")
                 }
