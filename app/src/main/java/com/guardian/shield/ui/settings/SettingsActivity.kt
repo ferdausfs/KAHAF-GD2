@@ -36,7 +36,6 @@ class SettingsActivity : AppCompatActivity() {
 
     private var isUpdatingFromState = false
 
-    // Model file picker
     private val modelPickLauncher = registerForActivityResult(
         ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
@@ -59,7 +58,6 @@ class SettingsActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        // Refresh model status when coming back
         updateModelStatus()
     }
 
@@ -81,32 +79,48 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun setupViews() {
-        // Switch listeners with guard
         binding.switchKeyword.setOnCheckedChangeListener { _, checked ->
-            if (!isUpdatingFromState) {
-                settingsVm.toggleKeyword(checked)
-            }
+            if (!isUpdatingFromState) settingsVm.toggleKeyword(checked)
         }
+        
         binding.switchAi.setOnCheckedChangeListener { _, checked ->
             if (!isUpdatingFromState) {
-                // BUG FIX: Pass modelAvailable so ViewModel can broadcast AFTER pref is saved.
-                // Previously, broadcast was sent before DataStore write completed (race condition).
                 val modelAvail = AiDetector.isModelAvailable(this)
-                settingsVm.toggleAi(checked, modelAvailable = modelAvail)
                 if (checked && !modelAvail) {
+                    // Don't enable if no model
+                    isUpdatingFromState = true
+                    binding.switchAi.isChecked = false
+                    isUpdatingFromState = false
                     settingsVm.showMessage("⚠️ Upload a .tflite model first!")
+                    return@setOnCheckedChangeListener
+                }
+                settingsVm.toggleAi(checked, modelAvailable = modelAvail)
+            }
+        }
+        
+        binding.switchStrictMode.setOnCheckedChangeListener { _, checked ->
+            if (!isUpdatingFromState) {
+                if (checked) {
+                    // Confirm strict mode
+                    MaterialAlertDialogBuilder(this)
+                        .setTitle("Enable Strict Mode?")
+                        .setMessage("Only apps in your Trusted Apps list will work. All other apps (except launcher) will be blocked. Make sure your essential apps are in the Trusted list first.")
+                        .setPositiveButton("Enable") { _, _ ->
+                            settingsVm.toggleStrictMode(true)
+                        }
+                        .setNegativeButton("Cancel") { _, _ ->
+                            isUpdatingFromState = true
+                            binding.switchStrictMode.isChecked = false
+                            isUpdatingFromState = false
+                        }
+                        .setCancelable(false)
+                        .show()
+                } else {
+                    settingsVm.toggleStrictMode(false)
                 }
             }
         }
-        // BUG FIX: switchStrictMode listener was missing — toggle clicked but nothing happened.
-        // Now properly calls toggleStrictMode() which saves pref + notifies service.
-        binding.switchStrictMode.setOnCheckedChangeListener { _, checked ->
-            if (!isUpdatingFromState) {
-                settingsVm.toggleStrictMode(checked)
-            }
-        }
 
-        // Delay unlock slider
         binding.sliderDelay.addOnChangeListener { _, value, fromUser ->
             if (fromUser) {
                 val secs = value.toInt()
@@ -115,7 +129,6 @@ class SettingsActivity : AppCompatActivity() {
             }
         }
 
-        // AI threshold slider
         binding.sliderAiThreshold.addOnChangeListener { _, value, fromUser ->
             if (fromUser) {
                 settingsVm.setAiThreshold(value)
@@ -123,12 +136,10 @@ class SettingsActivity : AppCompatActivity() {
             }
         }
 
-        // Model upload
         binding.btnUploadModel.setOnClickListener {
-            modelPickLauncher.launch("*/*")  // Accept any file type for .tflite
+            modelPickLauncher.launch("*/*")
         }
 
-        // Keyword add
         binding.btnAddKeyword.setOnClickListener {
             keywordVm.addKeyword()
         }
@@ -140,7 +151,6 @@ class SettingsActivity : AppCompatActivity() {
             keywordVm.updateInput(text.toString())
         }
 
-        // App picker buttons
         binding.btnAddBlockedApp.setOnClickListener {
             showAppPickerDialog(isWhitelist = false)
         }
@@ -160,7 +170,7 @@ class SettingsActivity : AppCompatActivity() {
                       else state.blockedApps.map { it.packageName }.toSet()
         val available = state.installedApps.filter { it.packageName !in already }
         if (available.isEmpty()) {
-            Snackbar.make(binding.root, "No more apps to add", Snackbar.LENGTH_SHORT).show()
+            Snackbar.make(binding.root, "No more apps", Snackbar.LENGTH_SHORT).show()
             return
         }
         val names = available.map { it.appName }.toTypedArray()
@@ -180,14 +190,13 @@ class SettingsActivity : AppCompatActivity() {
             settingsVm.uiState.collectLatest { state ->
                 isUpdatingFromState = true
 
-                binding.switchKeyword.isChecked   = state.isKeywordEnabled
-                binding.switchAi.isChecked        = state.isAiEnabled
-                // BUG FIX: switchStrictMode was never synced from state — always showed wrong value.
+                binding.switchKeyword.isChecked = state.isKeywordEnabled
+                binding.switchAi.isChecked = state.isAiEnabled
                 binding.switchStrictMode.isChecked = state.isStrictMode
-                binding.sliderDelay.value         = state.delayUnlockSeconds.toFloat()
-                binding.tvDelayValue.text         = "${state.delayUnlockSeconds}s"
-                binding.sliderAiThreshold.value   = state.aiThreshold
-                binding.tvAiThresholdValue.text   = "${(state.aiThreshold * 100).toInt()}%"
+                binding.sliderDelay.value = state.delayUnlockSeconds.toFloat()
+                binding.tvDelayValue.text = "${state.delayUnlockSeconds}s"
+                binding.sliderAiThreshold.value = state.aiThreshold
+                binding.tvAiThresholdValue.text = "${(state.aiThreshold * 100).toInt()}%"
                 binding.layoutAiOptions.isVisible = state.isAiEnabled
 
                 isUpdatingFromState = false
@@ -211,7 +220,7 @@ class SettingsActivity : AppCompatActivity() {
             binding.tvModelStatus.text = "✓ Model loaded (${sizeKB}KB)"
             binding.tvModelStatus.setTextColor(getColor(android.R.color.holo_green_dark))
         } else {
-            binding.tvModelStatus.text = "⚠️ No model — upload .tflite file"
+            binding.tvModelStatus.text = "⚠️ No model — upload .tflite"
             binding.tvModelStatus.setTextColor(getColor(android.R.color.holo_orange_dark))
         }
     }
@@ -220,7 +229,7 @@ class SettingsActivity : AppCompatActivity() {
         lifecycleScope.launch {
             keywordVm.uiState.collectLatest { state ->
                 binding.tvKeywordError.isVisible = state.errorMessage != null
-                binding.tvKeywordError.text      = state.errorMessage ?: ""
+                binding.tvKeywordError.text = state.errorMessage ?: ""
                 (binding.rvKeywords.adapter as? KeywordAdapter)?.submitList(state.keywords)
             }
         }
@@ -235,52 +244,46 @@ class SettingsActivity : AppCompatActivity() {
         }
     }
 
-    // KEY FIX: Proper model import with validation
     private fun importModel(uri: Uri) {
-        Timber.d("Importing model from: $uri")
+        Timber.d("Importing model: $uri")
         lifecycleScope.launch {
             try {
                 val dest = AiDetector.modelFile(this@SettingsActivity)
 
-                // Copy file
                 withContext(Dispatchers.IO) {
                     contentResolver.openInputStream(uri)?.use { input ->
                         dest.outputStream().use { output ->
                             val bytes = input.copyTo(output)
-                            Timber.d("Model copied: $bytes bytes → ${dest.absolutePath}")
+                            Timber.d("Model copied: $bytes bytes")
                         }
-                    } ?: throw Exception("Could not open input stream")
+                    } ?: throw Exception("Could not open file")
                 }
 
-                // Validate file
                 if (!dest.exists() || dest.length() < 1024) {
                     dest.delete()
-                    settingsVm.showMessage("❌ Invalid model file (too small)")
+                    settingsVm.showMessage("❌ Invalid model file")
                     return@launch
                 }
 
                 val sizeKB = dest.length() / 1024
-                Timber.d("Model file saved: ${sizeKB}KB at ${dest.absolutePath}")
-
-                // Update UI
                 updateModelStatus()
 
-                // If AI is enabled, immediately reload in service
                 val aiEnabled = settingsVm.uiState.value.isAiEnabled
                 if (aiEnabled) {
-                    Timber.d("AI is enabled — sending RELOAD_MODEL to service")
                     sendBroadcast(
                         Intent(GuardianAccessibilityService.ACTION_RELOAD_MODEL).apply {
                             setPackage(packageName)
                         }
                     )
-                    settingsVm.showMessage("✓ Model imported (${sizeKB}KB) — AI reloading...")
+                    settingsVm.showMessage("✓ Model imported (${sizeKB}KB) — reloading...")
                 } else {
-                    settingsVm.showMessage("✓ Model imported (${sizeKB}KB) — Enable AI Detection to activate")
+                    // Auto-enable AI when model is uploaded
+                    settingsVm.toggleAi(true, modelAvailable = true)
+                    settingsVm.showMessage("✓ Model imported & AI enabled (${sizeKB}KB)")
                 }
 
             } catch (e: Exception) {
-                Timber.e(e, "Model import FAILED")
+                Timber.e(e, "Model import failed")
                 settingsVm.showMessage("❌ Import failed: ${e.message}")
             }
         }

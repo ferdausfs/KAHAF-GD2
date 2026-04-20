@@ -4,6 +4,7 @@ package com.guardian.shield.ui.dashboard
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -34,18 +35,14 @@ class MainActivity : AppCompatActivity() {
     private val viewModel: DashboardViewModel by viewModels()
     private lateinit var eventAdapter: BlockEventAdapter
 
-    // FIX #7: Guard for switch listener
     private var isUpdatingSwitch = false
 
-    // BUG FIX: Request POST_NOTIFICATIONS on Android 13+ so the foreground
-    // service notification displays — without it the OS silently drops the
-    // notification and may kill the service on low-memory devices.
     private val notificationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             if (!granted) {
                 Snackbar.make(
                     binding.root,
-                    "Notification permission needed to keep protection running",
+                    "Notification permission needed",
                     Snackbar.LENGTH_LONG
                 ).show()
             }
@@ -60,6 +57,7 @@ class MainActivity : AppCompatActivity() {
         setupRecyclerView()
         setupClickListeners()
         observeState()
+        checkOverlayPermission()
     }
 
     override fun onResume() {
@@ -87,7 +85,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupClickListeners() {
-        // FIX #7: Switch with guard
         binding.switchProtection.setOnCheckedChangeListener { _, checked ->
             if (!isUpdatingSwitch) {
                 viewModel.toggleProtection(checked)
@@ -111,10 +108,28 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // FIX: Check and request overlay permission (needed for blur)
+    private fun checkOverlayPermission() {
+        if (!Settings.canDrawOverlays(this)) {
+            MaterialAlertDialogBuilder(this)
+                .setTitle("Overlay Permission Required")
+                .setMessage("Guardian Shield needs to draw over other apps to show blur overlay. Please grant this permission.")
+                .setPositiveButton("Grant") { _, _ ->
+                    val intent = Intent(
+                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:$packageName")
+                    )
+                    startActivity(intent)
+                }
+                .setNegativeButton("Later", null)
+                .setCancelable(false)
+                .show()
+        }
+    }
+
     private fun observeState() {
         lifecycleScope.launch {
             viewModel.uiState.collectLatest { state ->
-                // Status banner
                 val isActive = state.protectionState.isProtectionActive
                 binding.tvProtectionStatus.text =
                     if (isActive) getString(R.string.protection_active)
@@ -122,36 +137,34 @@ class MainActivity : AppCompatActivity() {
                 binding.cardStatus.setCardBackgroundColor(
                     getColor(if (isActive) R.color.status_active else R.color.status_inactive)
                 )
-                // Stats
+                
                 binding.tvTotalBlocked.text = state.stats.totalBlocked.toString()
                 binding.tvTodayBlocked.text = state.stats.todayBlocked.toString()
-                binding.tvLastBlocked.text  = state.stats.lastBlockedApp.ifEmpty { "None yet" }
+                binding.tvLastBlocked.text = state.stats.lastBlockedApp.ifEmpty { "None yet" }
 
-                // FIX #7: Switch update with guard
                 isUpdatingSwitch = true
                 if (binding.switchProtection.isChecked != state.isProtectionOn)
                     binding.switchProtection.isChecked = state.isProtectionOn
                 isUpdatingSwitch = false
 
-                // Accessibility card
                 val accessOk = state.protectionState.isAccessibilityEnabled
                 binding.ivAccessibilityStatus.setImageResource(
                     if (accessOk) R.drawable.ic_check_circle else R.drawable.ic_warning
                 )
                 binding.tvAccessibilityStatus.text =
-                    if (accessOk) "Accessibility Service: Active"
-                    else "Tap to enable Accessibility Service"
+                    if (accessOk) "Accessibility Service: Active ✓"
+                    else "⚠️ Tap to enable Accessibility Service"
                 binding.cardAccessibility.strokeColor =
                     getColor(if (accessOk) R.color.status_active else R.color.status_inactive)
-                // PIN card
+
                 val pinSet = state.protectionState.isPinSet
-                binding.tvPinStatus.text = if (pinSet) "PIN: Set ✓" else "PIN: Not set"
+                binding.tvPinStatus.text = if (pinSet) "PIN: Set ✓" else "⚠️ PIN: Not set"
                 binding.btnSetupPin.text = if (pinSet) "Change PIN" else "Set PIN"
-                // Recent events
-                binding.tvNoEvents.isVisible     = state.recentEvents.isEmpty()
+
+                binding.tvNoEvents.isVisible = state.recentEvents.isEmpty()
                 binding.rvRecentEvents.isVisible = state.recentEvents.isNotEmpty()
                 eventAdapter.submitList(state.recentEvents)
-                // Error
+
                 state.errorMessage?.let { msg ->
                     Snackbar.make(binding.root, msg, Snackbar.LENGTH_SHORT).show()
                     viewModel.clearError()
@@ -164,11 +177,19 @@ class MainActivity : AppCompatActivity() {
         MaterialAlertDialogBuilder(this)
             .setTitle("Enable Accessibility Service")
             .setMessage(
-                "Guardian Shield needs the Accessibility Service to detect and block content.\n\n" +
-                "Go to: Settings → Accessibility → Installed Services → Guardian Shield → Enable."
+                "Guardian Shield needs the Accessibility Service to detect content.\n\n" +
+                "Steps:\n" +
+                "1. Tap 'Open Settings'\n" +
+                "2. Find 'Guardian Shield' in the list\n" +
+                "3. Toggle it ON\n" +
+                "4. Confirm the permission"
             )
             .setPositiveButton("Open Settings") { _, _ ->
-                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                try {
+                    startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                } catch (e: Exception) {
+                    Snackbar.make(binding.root, "Cannot open settings", Snackbar.LENGTH_SHORT).show()
+                }
             }
             .setNegativeButton("Cancel", null)
             .show()

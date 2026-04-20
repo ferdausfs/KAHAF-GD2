@@ -17,22 +17,15 @@ import kotlinx.coroutines.launch
 import timber.log.Timber
 import javax.inject.Inject
 
-// ─────────────────────────────────────────────────────────────────────
-// Settings ViewModel
-// ─────────────────────────────────────────────────────────────────────
-
 data class SettingsUiState(
-    val isAiEnabled: Boolean            = false,
-    val isKeywordEnabled: Boolean       = true,
-    val isStrictMode: Boolean           = false,
-    val delayUnlockSeconds: Int         = 30,
-    val aiThreshold: Float              = 0.40f,
-    // BUG FIX #11: Default was 2500L (old value). Updated to 1000L to match
-    // the new GuardianPreferences default. Prevents a flash of wrong value
-    // in UI before the first DataStore emission arrives.
-    val aiIntervalMs: Long              = 1_000L,
-    val isPinSet: Boolean               = false,
-    val snackMessage: String?           = null
+    val isAiEnabled: Boolean = false,
+    val isKeywordEnabled: Boolean = true,
+    val isStrictMode: Boolean = false,
+    val delayUnlockSeconds: Int = 30,
+    val aiThreshold: Float = 0.35f,
+    val aiIntervalMs: Long = 1_500L,
+    val isPinSet: Boolean = false,
+    val snackMessage: String? = null
 )
 
 private data class SettingsSnapshot(
@@ -64,29 +57,22 @@ class SettingsViewModel @Inject constructor(
 
     private fun observePrefs() {
         viewModelScope.launch {
-            // Typed 5-arg combine overload — avoids Array<*> unboxing ClassCastException on ART.
             combine(
                 prefs.isAiDetectionEnabled,
                 prefs.isKeywordDetectionEnabled,
                 prefs.isStrictMode,
                 prefs.delayUnlockSeconds,
                 prefs.aiThreshold
-            ) { ai: Boolean, keyword: Boolean, strict: Boolean, delay: Int, threshold: Float ->
-                SettingsSnapshot(
-                    ai        = ai,
-                    keyword   = keyword,
-                    strict    = strict,
-                    delay     = delay,
-                    threshold = threshold
-                )
+            ) { ai, keyword, strict, delay, threshold ->
+                SettingsSnapshot(ai, keyword, strict, delay, threshold)
             }.collect { snap ->
                 _uiState.update {
                     it.copy(
-                        isAiEnabled        = snap.ai,
-                        isKeywordEnabled   = snap.keyword,
-                        isStrictMode       = snap.strict,
+                        isAiEnabled = snap.ai,
+                        isKeywordEnabled = snap.keyword,
+                        isStrictMode = snap.strict,
                         delayUnlockSeconds = snap.delay,
-                        aiThreshold        = snap.threshold
+                        aiThreshold = snap.threshold
                     )
                 }
             }
@@ -102,11 +88,6 @@ class SettingsViewModel @Inject constructor(
         _uiState.update { it.copy(isPinSet = isPinSetUseCase()) }
     }
 
-    /**
-     * Toggle AI detection — saves preference AND broadcasts to service.
-     * Broadcast sent AFTER DataStore write completes (avoids race where service
-     * reads stale "false" and immediately stops AI).
-     */
     fun toggleAi(enabled: Boolean, modelAvailable: Boolean = false) {
         viewModelScope.launch {
             toggleAiDetectionUseCase(enabled)
@@ -114,7 +95,7 @@ class SettingsViewModel @Inject constructor(
                 notifyService(GuardianAccessibilityService.ACTION_RELOAD_MODEL)
                 _uiState.update { it.copy(snackMessage = "AI detection enabled ✓") }
             } else if (!enabled) {
-                notifyService(GuardianAccessibilityService.ACTION_REFRESH_RULES)
+                notifyService(GuardianAccessibilityService.ACTION_RELOAD_MODEL)
                 _uiState.update { it.copy(snackMessage = "AI detection disabled") }
             }
         }
@@ -131,20 +112,27 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch {
             toggleStrictModeUseCase(enabled)
             notifyService(GuardianAccessibilityService.ACTION_REFRESH_RULES)
+            _uiState.update { 
+                it.copy(snackMessage = if (enabled) 
+                    "Strict mode ON — only trusted apps allowed" 
+                else 
+                    "Strict mode OFF") 
+            }
         }
     }
 
     fun setDelaySeconds(secs: Int) {
         viewModelScope.launch {
             setDelayUnlockSecondsUseCase(secs.coerceIn(10, 300))
+            notifyService(GuardianAccessibilityService.ACTION_UPDATE_SETTINGS)
         }
     }
 
+    // FIX: Live threshold update - notifies service to reload value
     fun setAiThreshold(v: Float) {
         viewModelScope.launch {
             prefs.setAiThreshold(v)
-            // Notify service so aiThreshold var is updated live (not just on restart)
-            notifyService(GuardianAccessibilityService.ACTION_REFRESH_RULES)
+            notifyService(GuardianAccessibilityService.ACTION_UPDATE_SETTINGS)
         }
     }
 
@@ -167,14 +155,10 @@ class SettingsViewModel @Inject constructor(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// Keyword ViewModel
-// ─────────────────────────────────────────────────────────────────────
-
 data class KeywordUiState(
-    val keywords: List<KeywordRule>  = emptyList(),
-    val inputText: String            = "",
-    val errorMessage: String?        = null
+    val keywords: List<KeywordRule> = emptyList(),
+    val inputText: String = "",
+    val errorMessage: String? = null
 )
 
 @HiltViewModel
@@ -204,7 +188,7 @@ class KeywordViewModel @Inject constructor(
         viewModelScope.launch {
             val text = _uiState.value.inputText.trim()
             if (text.length < 2) {
-                _uiState.update { it.copy(errorMessage = "Keyword must be at least 2 characters") }
+                _uiState.update { it.copy(errorMessage = "At least 2 characters") }
                 return@launch
             }
             val added = addKeywordUseCase(text)
@@ -212,7 +196,7 @@ class KeywordViewModel @Inject constructor(
                 _uiState.update { it.copy(inputText = "", errorMessage = null) }
                 notifyService()
             } else {
-                _uiState.update { it.copy(errorMessage = "Keyword too short") }
+                _uiState.update { it.copy(errorMessage = "Too short") }
             }
         }
     }
@@ -232,19 +216,15 @@ class KeywordViewModel @Inject constructor(
                 }
             )
         } catch (e: Exception) {
-            Timber.e(e, "KeywordViewModel notifyService failed")
+            Timber.e(e, "notifyService")
         }
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// PIN ViewModel
-// ─────────────────────────────────────────────────────────────────────
-
 data class PinUiState(
-    val input: String       = "",
-    val confirm: String     = "",
-    val error: String?      = null,
+    val input: String = "",
+    val confirm: String = "",
+    val error: String? = null,
     val isVerified: Boolean = false
 )
 
@@ -267,14 +247,14 @@ class PinViewModel @Inject constructor(
     }
 
     fun setupPin() {
-        val pin     = _uiState.value.input
+        val pin = _uiState.value.input
         val confirm = _uiState.value.confirm
         when (setupPinUseCase(pin, confirm)) {
-            PinSetupResult.Success      -> _uiState.update { it.copy(isVerified = true, error = null) }
-            PinSetupResult.TooShort     -> _uiState.update { it.copy(error = "PIN must be at least ${PinManager.MIN_PIN_LENGTH} digits") }
-            PinSetupResult.Mismatch     -> _uiState.update { it.copy(error = "PINs do not match") }
-            PinSetupResult.InvalidChars -> _uiState.update { it.copy(error = "PIN must contain digits only") }
-            PinSetupResult.Failed       -> _uiState.update { it.copy(error = "Failed to save PIN. Try again.") }
+            PinSetupResult.Success -> _uiState.update { it.copy(isVerified = true, error = null) }
+            PinSetupResult.TooShort -> _uiState.update { it.copy(error = "Min ${PinManager.MIN_PIN_LENGTH} digits") }
+            PinSetupResult.Mismatch -> _uiState.update { it.copy(error = "PINs do not match") }
+            PinSetupResult.InvalidChars -> _uiState.update { it.copy(error = "Digits only") }
+            PinSetupResult.Failed -> _uiState.update { it.copy(error = "Failed to save") }
         }
     }
 

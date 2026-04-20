@@ -4,38 +4,29 @@ package com.guardian.shield.service.blur
 import android.content.Context
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
+import android.widget.FrameLayout
+import android.widget.TextView
 import dagger.hilt.android.qualifiers.ApplicationContext
 import timber.log.Timber
 import javax.inject.Inject
 import javax.inject.Singleton
 
-/**
- * BlurOverlayManager — shows / hides a full-screen blur overlay using WindowManager.
- *
- * Uses TYPE_APPLICATION_OVERLAY (requires SYSTEM_ALERT_WINDOW permission, already
- * granted for the block overlay feature).
- *
- * Visual effect:
- *   • Android 12+ (API 31): real gaussian blur behind the overlay via blurBehindRadius
- *   • All versions: dark frosted-glass overlay (semi-transparent black)
- *
- * All WindowManager calls are posted to the main thread — safe to call from any thread.
- */
 @Singleton
 class BlurOverlayManager @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
-
     companion object {
         private const val TAG = "Guardian_BlurOverlay"
-        private const val OVERLAY_ALPHA = 0.82f       // 82% opaque dark overlay
-        private const val BLUR_RADIUS   = 30           // API 31+ gaussian radius
+        // FIX: Stronger overlay - fully opaque to guarantee content hiding
+        private const val OVERLAY_ALPHA = 0.95f
+        private const val BLUR_RADIUS = 30
     }
 
     @Volatile var isShowing = false
@@ -44,23 +35,14 @@ class BlurOverlayManager @Inject constructor(
     private var overlayView: View? = null
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    // ── Public API ─────────────────────────────────────────────────────
-
-    /**
-     * Show the blur overlay. Safe to call repeatedly — no-op if already showing.
-     * Must be called with SYSTEM_ALERT_WINDOW permission granted.
-     */
     fun show() {
         if (isShowing) return
         mainHandler.post {
-            if (isShowing) return@post    // double-check after post
+            if (isShowing) return@post
             addOverlay()
         }
     }
 
-    /**
-     * Hide the blur overlay. Safe to call repeatedly — no-op if not showing.
-     */
     fun hide() {
         if (!isShowing) return
         mainHandler.post {
@@ -69,12 +51,9 @@ class BlurOverlayManager @Inject constructor(
         }
     }
 
-    // ── Internal ───────────────────────────────────────────────────────
-
     private fun addOverlay() {
         try {
             val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-
             val view = buildOverlayView()
 
             val params = WindowManager.LayoutParams(
@@ -90,20 +69,13 @@ class BlurOverlayManager @Inject constructor(
                 gravity = Gravity.TOP or Gravity.START
                 x = 0; y = 0
 
-                // Android 12+ real blur behind the overlay window
-                // BUG FIX: Check isCrossWindowBlurEnabled() first — many OEMs (Samsung, Xiaomi)
-                // disable cross-window blur. Without this check the flag is set but has no effect,
-                // making it look like the overlay is just dark with no blur.
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                     val wm2 = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-                    val blurSupported = wm2.isCrossWindowBlurEnabled
-                    if (blurSupported) {
+                    if (wm2.isCrossWindowBlurEnabled) {
                         @Suppress("DEPRECATION")
                         flags = flags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND
                         blurBehindRadius = BLUR_RADIUS
-                        Timber.d("$TAG cross-window blur enabled — using gaussian blur")
-                    } else {
-                        Timber.d("$TAG cross-window blur disabled by device/OEM — using dark overlay only")
+                        Timber.d("$TAG gaussian blur enabled")
                     }
                 }
             }
@@ -112,9 +84,8 @@ class BlurOverlayManager @Inject constructor(
             overlayView = view
             isShowing = true
             Timber.d("$TAG overlay SHOWN")
-
         } catch (e: SecurityException) {
-            Timber.e(e, "$TAG No SYSTEM_ALERT_WINDOW permission — overlay blocked")
+            Timber.e(e, "$TAG No SYSTEM_ALERT_WINDOW permission")
         } catch (e: Exception) {
             Timber.e(e, "$TAG addOverlay failed")
         }
@@ -129,33 +100,32 @@ class BlurOverlayManager @Inject constructor(
             isShowing = false
             Timber.d("$TAG overlay HIDDEN")
         } catch (e: Exception) {
-            // View may have already been removed by the system
             overlayView = null
             isShowing = false
-            Timber.w("$TAG removeOverlay exception (may be harmless): ${e.message}")
+            Timber.w("$TAG removeOverlay: ${e.message}")
         }
     }
 
-    /**
-     * Build the visual overlay view.
-     *
-     * Design: deep dark frosted glass.
-     * • Pure black fill at OVERLAY_ALPHA for strong content occlusion.
-     * • On API 31+, the window-level gaussian blur adds the frosted effect behind.
-     * • On older APIs the dark fill alone is sufficient to block content.
-     */
+    // FIX: Better visual with message and icon
     private fun buildOverlayView(): View {
-        return View(context).apply {
-            // Dark semi-transparent fill — occludes any content underneath
-            setBackgroundColor(
-                Color.argb(
-                    (OVERLAY_ALPHA * 255).toInt(),
-                    0, 0, 0
-                )
-            )
-            // Accessibility: mark as non-interactive decoration
+        return FrameLayout(context).apply {
+            setBackgroundColor(Color.argb((OVERLAY_ALPHA * 255).toInt(), 15, 15, 20))
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
             contentDescription = null
+
+            // Add a visible message
+            val messageView = TextView(context).apply {
+                text = "🛡️\n\nContent Blurred\nby Guardian Shield"
+                setTextColor(Color.WHITE)
+                textSize = 22f
+                gravity = Gravity.CENTER
+                setPadding(48, 48, 48, 48)
+            }
+            val lp = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            ).apply { gravity = Gravity.CENTER }
+            addView(messageView, lp)
         }
     }
 }

@@ -20,51 +20,51 @@ class GuardianPreferences @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
     companion object {
-        val KEY_PROTECTION_ENABLED  = booleanPreferencesKey("protection_enabled")
-        val KEY_AI_DETECTION_ON     = booleanPreferencesKey("ai_detection_enabled")
-        val KEY_KEYWORD_DETECTION_ON= booleanPreferencesKey("keyword_detection_enabled")
-        val KEY_STRICT_MODE         = booleanPreferencesKey("strict_mode")
-        val KEY_DELAY_UNLOCK_SECS   = intPreferencesKey("delay_unlock_seconds")
-        val KEY_FIRST_RUN           = booleanPreferencesKey("first_run")
-        val KEY_AI_THRESHOLD        = floatPreferencesKey("ai_threshold")
-        val KEY_AI_INTERVAL_MS      = longPreferencesKey("ai_interval_ms")
+        val KEY_PROTECTION_ENABLED = booleanPreferencesKey("protection_enabled")
+        val KEY_AI_DETECTION_ON = booleanPreferencesKey("ai_detection_enabled")
+        val KEY_KEYWORD_DETECTION_ON = booleanPreferencesKey("keyword_detection_enabled")
+        val KEY_STRICT_MODE = booleanPreferencesKey("strict_mode")
+        val KEY_DELAY_UNLOCK_SECS = intPreferencesKey("delay_unlock_seconds")
+        val KEY_FIRST_RUN = booleanPreferencesKey("first_run")
+        val KEY_AI_THRESHOLD = floatPreferencesKey("ai_threshold")
+        val KEY_AI_INTERVAL_MS = longPreferencesKey("ai_interval_ms")
     }
 
     val isProtectionEnabled: Flow<Boolean> = context.dataStore.data
-        .catch { e -> Timber.e(e, "DataStore read error"); emit(emptyPreferences()) }
+        .catch { e -> Timber.e(e); emit(emptyPreferences()) }
         .map { it[KEY_PROTECTION_ENABLED] ?: true }
 
+    // FIX: Default AI = false. User should explicitly enable after uploading model.
+    // Previous default=true caused confusion when no model was present.
     val isAiDetectionEnabled: Flow<Boolean> = context.dataStore.data
-        .catch { e -> Timber.e(e, "DataStore read error"); emit(emptyPreferences()) }
-        .map { it[KEY_AI_DETECTION_ON] ?: true }   // BUG FIX: was false — AI (and blur) never started by default
+        .catch { e -> Timber.e(e); emit(emptyPreferences()) }
+        .map { it[KEY_AI_DETECTION_ON] ?: false }
 
     val isKeywordDetectionEnabled: Flow<Boolean> = context.dataStore.data
-        .catch { e -> Timber.e(e, "DataStore read error"); emit(emptyPreferences()) }
+        .catch { e -> Timber.e(e); emit(emptyPreferences()) }
         .map { it[KEY_KEYWORD_DETECTION_ON] ?: true }
 
     val isStrictMode: Flow<Boolean> = context.dataStore.data
-        .catch { e -> Timber.e(e, "DataStore read error"); emit(emptyPreferences()) }
+        .catch { e -> Timber.e(e); emit(emptyPreferences()) }
         .map { it[KEY_STRICT_MODE] ?: false }
 
     val delayUnlockSeconds: Flow<Int> = context.dataStore.data
-        .catch { e -> Timber.e(e, "DataStore read error"); emit(emptyPreferences()) }
+        .catch { e -> Timber.e(e); emit(emptyPreferences()) }
         .map { (it[KEY_DELAY_UNLOCK_SECS] ?: 30).coerceIn(10, 300) }
 
     val isFirstRun: Flow<Boolean> = context.dataStore.data
-        .catch { e -> Timber.e(e, "DataStore read error"); emit(emptyPreferences()) }
+        .catch { e -> Timber.e(e); emit(emptyPreferences()) }
         .map { it[KEY_FIRST_RUN] ?: true }
 
+    // FIX: Lower default threshold for better detection (0.35 instead of 0.40)
     val aiThreshold: Flow<Float> = context.dataStore.data
-        .catch { e -> Timber.e(e, "DataStore read error"); emit(emptyPreferences()) }
-        .map { it[KEY_AI_THRESHOLD] ?: 0.40f }
+        .catch { e -> Timber.e(e); emit(emptyPreferences()) }
+        .map { it[KEY_AI_THRESHOLD] ?: 0.35f }
 
-    // BUG FIX #6: Default interval reduced from 2500ms → 1000ms.
-    // Old 2500ms + 12 tile inferences (~600ms) + overhead = ~3.5s blur delay.
-    // New 1000ms = blur appears within ~1.5s of content being detected.
-    // Range kept 1000-10000ms. Users who need less CPU usage can increase via settings.
+    // FIX: 1500ms interval - balance between responsiveness and battery
     val aiIntervalMs: Flow<Long> = context.dataStore.data
-        .catch { e -> Timber.e(e, "DataStore read error"); emit(emptyPreferences()) }
-        .map { it[KEY_AI_INTERVAL_MS] ?: 1_000L }
+        .catch { e -> Timber.e(e); emit(emptyPreferences()) }
+        .map { it[KEY_AI_INTERVAL_MS] ?: 1_500L }
 
     suspend fun setProtectionEnabled(enabled: Boolean) {
         context.dataStore.edit { it[KEY_PROTECTION_ENABLED] = enabled }
